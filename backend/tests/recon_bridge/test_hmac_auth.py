@@ -99,3 +99,34 @@ class TestNonceReplay:
         cache = NonceCache(max_size=100, ttl_seconds=300)
         cache.assert_unseen(KEY_ID, 1700000000, "a" * 64)
         cache.assert_unseen(KEY_ID, 1700000000, "b" * 64)  # different sig, ok
+
+
+class TestCrossCompatVectorsWithDeepEye:
+    """Same vectors as deep-eye's tests/test_hmac_auth.py.
+
+    If either side's algorithm changes, both files need to be updated together.
+    """
+
+    KEY = b"test-shared-key-32bytes-minimum-padding"
+    VECTORS = [
+        (
+            "GET",
+            "/bridge/enrich/example.com",
+            1700000000,
+            b"",
+            "b496801ac136ced315787382a245783f9ac671c9bbbfbca97fc66aa60b95deb5",
+        ),
+        (
+            "POST",
+            "/bridge/scope/check",
+            1700000000,
+            b'{"target":{"kind":"url","value":"https://x.test"}}',
+            "c78d0aba9e1f782b07614a42b6e9cb70e48802cccc660463089e590419880627",
+        ),
+    ]
+
+    @pytest.mark.parametrize("method,path,ts,body,expected", VECTORS)
+    def test_matches_deep_eye(self, method, path, ts, body, expected):
+        from services.recon_bridge.hmac_auth import sign_request
+
+        assert sign_request(self.KEY, method, path, ts, body) == expected
