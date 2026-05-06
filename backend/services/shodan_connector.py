@@ -314,3 +314,37 @@ def lookup_shodan_host(ip: str, history: bool = False) -> dict[str, Any]:
         "history": bool(history),
         "note": "Operator-triggered Shodan host lookup. Not merged into ShadowBroker datasets.",
     }
+
+
+def host_lookup_for_recon_bridge(target: str) -> dict[str, Any]:
+    """Recon-bridge-specific Shodan lookup.
+
+    Unwraps the envelope returned by lookup_shodan_host / search_shodan into a
+    single flat dict the enrichment aggregator can consume. Empty dict on miss
+    or any error — the caller treats that as opportunistic miss, not error,
+    per spec §9.
+    """
+    if not target:
+        return {}
+
+    import ipaddress
+    try:
+        ipaddress.ip_address(target)
+        is_ip = True
+    except ValueError:
+        is_ip = False
+
+    try:
+        if is_ip:
+            data = lookup_shodan_host(target)
+            host = (data or {}).get("host") if isinstance(data, dict) else None
+            return host if isinstance(host, dict) else {}
+        results = search_shodan(query=f"hostname:{target}", page=1)
+        matches = (results or {}).get("matches") or []
+        return matches[0] if matches and isinstance(matches[0], dict) else {}
+    except ShodanConnectorError as exc:
+        logger.info("shodan recon-bridge lookup miss: %s", exc.detail)
+        return {}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("shodan recon-bridge lookup error: %s", exc)
+        return {}

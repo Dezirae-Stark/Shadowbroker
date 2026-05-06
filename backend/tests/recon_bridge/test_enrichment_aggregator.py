@@ -123,3 +123,80 @@ async def test_slow_feed_times_out_and_other_feeds_still_return():
     # Other feeds unaffected
     assert r.geo is not None
     assert r.ct_logs
+
+
+class TestShodanConnectorAdapter:
+    @pytest.mark.asyncio
+    async def test_adapter_calls_underlying_connector_in_executor(self, monkeypatch):
+        from services.recon_bridge.enrichment_aggregator import ShodanConnectorAdapter
+
+        captured = {}
+
+        def fake_host_lookup(target: str) -> dict:
+            captured["target"] = target
+            return {"ip_str": "1.2.3.4", "ports": [80, 443]}
+
+        monkeypatch.setenv("SHODAN_API_KEY", "fake-key-for-test")
+        monkeypatch.setattr(
+            "services.shodan_connector.host_lookup_for_recon_bridge",
+            fake_host_lookup,
+            raising=False,
+        )
+
+        adapter = ShodanConnectorAdapter()
+        result = await adapter.lookup("example.com")
+        assert result == {"ip_str": "1.2.3.4", "ports": [80, 443]}
+        assert captured["target"] == "example.com"
+
+    @pytest.mark.asyncio
+    async def test_adapter_returns_empty_when_api_key_missing(self, monkeypatch):
+        from services.recon_bridge.enrichment_aggregator import ShodanConnectorAdapter
+
+        monkeypatch.delenv("SHODAN_API_KEY", raising=False)
+        adapter = ShodanConnectorAdapter()
+        result = await adapter.lookup("example.com")
+        # Per the spec: enrichment is opportunistic. No API key → empty result, no raise.
+        assert result == {}
+
+    @pytest.mark.asyncio
+    async def test_wrapper_uses_host_endpoint_for_ip_target(self, monkeypatch):
+        """host_lookup_for_recon_bridge dispatches IP → lookup_shodan_host
+        and extracts the inner host dict from the envelope."""
+        from services import shodan_connector
+
+        captured = {}
+
+        def fake_lookup_host(ip: str, history: bool = False) -> dict:
+            captured["ip"] = ip
+            return {"ok": True, "source": "Shodan", "host": {"ip": ip, "ports": [22]}}
+
+        monkeypatch.setattr(shodan_connector, "lookup_shodan_host", fake_lookup_host)
+        result = shodan_connector.host_lookup_for_recon_bridge("8.8.8.8")
+        assert captured["ip"] == "8.8.8.8"
+        assert result == {"ip": "8.8.8.8", "ports": [22]}
+
+    @pytest.mark.asyncio
+    async def test_wrapper_uses_search_for_hostname_target(self, monkeypatch):
+        """host_lookup_for_recon_bridge dispatches hostname → search_shodan."""
+        from services import shodan_connector
+
+        captured = {}
+
+        def fake_search(query: str, page: int = 1, facets=None) -> dict:
+            captured["query"] = query
+            return {"matches": [{"ip_str": "1.1.1.1", "hostname": "acme.com"}]}
+
+        monkeypatch.setattr(shodan_connector, "search_shodan", fake_search)
+        result = shodan_connector.host_lookup_for_recon_bridge("acme.com")
+        assert captured["query"] == "hostname:acme.com"
+        assert result == {"ip_str": "1.1.1.1", "hostname": "acme.com"}
+
+    def test_wrapper_swallows_connector_error(self, monkeypatch):
+        """Per spec §9: enrichment misses are not errors."""
+        from services import shodan_connector
+
+        def boom(ip: str, history: bool = False) -> dict:
+            raise shodan_connector.ShodanConnectorError("rate limited", status_code=429)
+
+        monkeypatch.setattr(shodan_connector, "lookup_shodan_host", boom)
+        assert shodan_connector.host_lookup_for_recon_bridge("8.8.8.8") == {}

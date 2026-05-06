@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any, Optional, Protocol
@@ -133,3 +134,30 @@ class EnrichmentAggregator:
         except Exception as exc:  # noqa: BLE001 — degrade gracefully per spec §9
             logger.warning("Enrichment feed %s failed: %s", name, exc)
             return _FeedError(detail=str(exc))
+
+
+class ShodanConnectorAdapter:
+    """Async adapter around services.shodan_connector for the aggregator.
+
+    The underlying shodan_connector is synchronous (uses requests). We run its
+    calls in the default asyncio thread executor so they don't block the event
+    loop. We degrade gracefully when SHODAN_API_KEY is unset — the aggregator
+    just receives an empty dict, which it treats as "no shodan data" rather
+    than a feed error.
+    """
+
+    async def lookup(self, target: str) -> dict[str, Any]:
+        if not os.environ.get("SHODAN_API_KEY"):
+            return {}
+        try:
+            from services import shodan_connector
+        except ImportError:
+            return {}
+
+        func = getattr(shodan_connector, "host_lookup_for_recon_bridge", None)
+        if func is None:
+            logger.warning("shodan_connector.host_lookup_for_recon_bridge missing")
+            return {}
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, func, target)
