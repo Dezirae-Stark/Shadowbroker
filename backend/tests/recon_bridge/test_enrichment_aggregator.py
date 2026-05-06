@@ -397,3 +397,64 @@ class TestGeopoliticsAdapter:
         monkeypatch.setitem(_store.latest_data, "gdelt", fake_features)
         results = geopolitics.alerts_for_org_recon_bridge("GlobalCorp", max_results=5)
         assert len(results) == 5
+
+
+class TestCTLogsAdapter:
+    @pytest.mark.asyncio
+    async def test_adapter_returns_certs_from_crtsh(self, respx_mock):
+        from services.recon_bridge.enrichment_aggregator import CTLogsAdapter
+
+        respx_mock.get("https://crt.sh/").respond(
+            200,
+            json=[
+                {"name_value": "example.com", "issuer_name": "Test CA"},
+                {"name_value": "api.example.com", "issuer_name": "Test CA"},
+            ],
+        )
+        adapter = CTLogsAdapter()
+        certs = await adapter.certificates("example.com")
+        assert len(certs) == 2
+        assert certs[0]["cn"] == "example.com"
+        assert certs[0]["issuer"] == "Test CA"
+
+    @pytest.mark.asyncio
+    async def test_adapter_returns_empty_on_http_error(self, respx_mock):
+        from services.recon_bridge.enrichment_aggregator import CTLogsAdapter
+
+        respx_mock.get("https://crt.sh/").respond(503)
+        adapter = CTLogsAdapter()
+        certs = await adapter.certificates("example.com")
+        assert certs == []
+
+    @pytest.mark.asyncio
+    async def test_adapter_returns_empty_on_network_error(self, respx_mock):
+        import httpx
+        from services.recon_bridge.enrichment_aggregator import CTLogsAdapter
+
+        respx_mock.get("https://crt.sh/").mock(side_effect=httpx.ConnectError("nope"))
+        adapter = CTLogsAdapter()
+        certs = await adapter.certificates("example.com")
+        assert certs == []
+
+    @pytest.mark.asyncio
+    async def test_adapter_skips_entries_without_name_value(self, respx_mock):
+        from services.recon_bridge.enrichment_aggregator import CTLogsAdapter
+
+        respx_mock.get("https://crt.sh/").respond(
+            200,
+            json=[
+                {"name_value": "example.com", "issuer_name": "Test CA"},
+                {"issuer_name": "Test CA"},  # no name_value, skipped
+                {"name_value": "", "issuer_name": "Test CA"},  # empty, skipped
+            ],
+        )
+        adapter = CTLogsAdapter()
+        certs = await adapter.certificates("example.com")
+        assert len(certs) == 1
+
+    @pytest.mark.asyncio
+    async def test_adapter_returns_empty_for_empty_target(self):
+        from services.recon_bridge.enrichment_aggregator import CTLogsAdapter
+
+        adapter = CTLogsAdapter()
+        assert await adapter.certificates("") == []

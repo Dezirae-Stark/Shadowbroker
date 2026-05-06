@@ -21,6 +21,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Optional, Protocol
 
+import httpx
+
 logger = logging.getLogger(__name__)
 
 
@@ -161,6 +163,43 @@ class ShodanConnectorAdapter:
 
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, func, target)
+
+
+class CTLogsAdapter:
+    """Async adapter that queries crt.sh directly for CT log entries.
+
+    Unlike the other adapters, there's no Shadowbroker service to wrap —
+    crt.sh is the canonical free CT log search. We use httpx.AsyncClient
+    natively, no thread executor needed.
+
+    Returns [] on any error or empty target. Each entry is normalized to
+    {cn, issuer}; entries without name_value are skipped.
+    """
+
+    BASE = "https://crt.sh/"
+
+    def __init__(self, *, timeout: float = 10.0) -> None:
+        self._timeout = timeout
+
+    async def certificates(self, target: str) -> list[dict[str, Any]]:
+        if not target:
+            return []
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                resp = await client.get(self.BASE, params={"q": target, "output": "json"})
+            if resp.status_code != 200:
+                return []
+            data = resp.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.info("ct logs lookup miss for %s: %s", target, exc)
+            return []
+        if not isinstance(data, list):
+            return []
+        return [
+            {"cn": entry.get("name_value"), "issuer": entry.get("issuer_name")}
+            for entry in data
+            if isinstance(entry, dict) and entry.get("name_value")
+        ]
 
 
 class GeopoliticsAdapter:
