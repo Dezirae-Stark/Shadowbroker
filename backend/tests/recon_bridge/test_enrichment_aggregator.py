@@ -200,3 +200,117 @@ class TestShodanConnectorAdapter:
 
         monkeypatch.setattr(shodan_connector, "lookup_shodan_host", boom)
         assert shodan_connector.host_lookup_for_recon_bridge("8.8.8.8") == {}
+
+
+class TestRegionDossierAdapter:
+    @pytest.mark.asyncio
+    async def test_adapter_returns_country_asn_org(self, monkeypatch):
+        from services.recon_bridge.enrichment_aggregator import RegionDossierAdapter
+
+        def fake_lookup(target: str) -> dict:
+            return {"country": "US", "asn": "AS15169", "org": "Google LLC"}
+
+        monkeypatch.setattr(
+            "services.region_dossier.lookup_for_recon_bridge",
+            fake_lookup,
+            raising=False,
+        )
+        adapter = RegionDossierAdapter()
+        r = await adapter.lookup("example.com")
+        assert r["country"] == "US"
+        assert r["asn"] == "AS15169"
+        assert r["org"] == "Google LLC"
+
+    def test_wrapper_extracts_country_asn_org_from_ip_api_response(self, monkeypatch):
+        from services import region_dossier
+
+        class FakeResp:
+            status_code = 200
+            def json(self):
+                return {
+                    "status": "success",
+                    "country": "United States",
+                    "org": "Google Public DNS",
+                    "as": "AS15169 Google LLC",
+                    "query": "8.8.8.8",
+                }
+
+        monkeypatch.setattr(region_dossier._requests, "get", lambda *a, **kw: FakeResp())
+        result = region_dossier.lookup_for_recon_bridge("8.8.8.8")
+        assert result["country"] == "United States"
+        assert result["asn"] == "AS15169"
+        assert result["org"] == "Google Public DNS"
+
+    def test_wrapper_resolves_hostname_to_ip_before_query(self, monkeypatch):
+        from services import region_dossier
+
+        captured = {}
+
+        def fake_gethostbyname(host: str) -> str:
+            captured["host"] = host
+            return "1.2.3.4"
+
+        class FakeResp:
+            status_code = 200
+            def json(self):
+                captured["url_called"] = True
+                return {"status": "success", "country": "X", "org": "Y", "as": "AS1 Z"}
+
+        monkeypatch.setattr("socket.gethostbyname", fake_gethostbyname)
+        monkeypatch.setattr(region_dossier._requests, "get", lambda *a, **kw: FakeResp())
+        result = region_dossier.lookup_for_recon_bridge("example.com")
+        assert captured["host"] == "example.com"
+        assert captured.get("url_called") is True
+        assert result["country"] == "X"
+
+    def test_wrapper_strips_url_scheme_before_resolving(self, monkeypatch):
+        from services import region_dossier
+
+        captured = {}
+
+        def fake_gethostbyname(host: str) -> str:
+            captured["host"] = host
+            return "1.2.3.4"
+
+        class FakeResp:
+            status_code = 200
+            def json(self):
+                return {"status": "success", "country": "X", "org": "Y", "as": "AS1 Z"}
+
+        monkeypatch.setattr("socket.gethostbyname", fake_gethostbyname)
+        monkeypatch.setattr(region_dossier._requests, "get", lambda *a, **kw: FakeResp())
+        region_dossier.lookup_for_recon_bridge("https://api.example.com/path?q=1")
+        assert captured["host"] == "api.example.com"
+
+    def test_wrapper_returns_empty_on_dns_failure(self, monkeypatch):
+        from services import region_dossier
+        import socket
+
+        def fake_gethostbyname(host: str) -> str:
+            raise socket.gaierror("nope")
+
+        monkeypatch.setattr("socket.gethostbyname", fake_gethostbyname)
+        assert region_dossier.lookup_for_recon_bridge("nonexistent.example") == {}
+
+    def test_wrapper_returns_empty_on_ip_api_failure(self, monkeypatch):
+        from services import region_dossier
+
+        class FakeResp:
+            status_code = 500
+            def json(self):
+                return {}
+
+        monkeypatch.setattr(region_dossier._requests, "get", lambda *a, **kw: FakeResp())
+        assert region_dossier.lookup_for_recon_bridge("8.8.8.8") == {}
+
+    def test_wrapper_returns_empty_on_ip_api_status_fail(self, monkeypatch):
+        """ip-api.com returns 200 with status='fail' for invalid lookups."""
+        from services import region_dossier
+
+        class FakeResp:
+            status_code = 200
+            def json(self):
+                return {"status": "fail", "message": "invalid query"}
+
+        monkeypatch.setattr(region_dossier._requests, "get", lambda *a, **kw: FakeResp())
+        assert region_dossier.lookup_for_recon_bridge("8.8.8.8") == {}

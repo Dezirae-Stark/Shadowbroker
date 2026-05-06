@@ -161,3 +161,27 @@ class ShodanConnectorAdapter:
 
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, func, target)
+
+
+class RegionDossierAdapter:
+    """Async adapter around services.region_dossier.lookup_for_recon_bridge.
+
+    The underlying lookup is synchronous (DNS + ip-api.com HTTP). We run it
+    in the default thread executor so it doesn't block the event loop.
+    Returns {} on any failure — region_dossier never raises into the event
+    loop.
+    """
+
+    async def lookup(self, target: str) -> dict[str, Any]:
+        try:
+            from services import region_dossier
+        except ImportError:
+            return {}
+
+        func = getattr(region_dossier, "lookup_for_recon_bridge", None)
+        if func is None:
+            logger.warning("region_dossier.lookup_for_recon_bridge missing")
+            return {}
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, func, target)

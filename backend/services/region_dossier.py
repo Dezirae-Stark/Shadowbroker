@@ -270,3 +270,76 @@ def get_region_dossier(lat: float, lng: float) -> dict:
 
     dossier_cache[cache_key] = result
     return result
+
+
+def lookup_for_recon_bridge(target: str) -> dict:
+    """Recon-bridge GeoIP lookup. Returns at most {country, asn, org}.
+
+    Resolves hostname/URL targets to an IP via DNS, then queries ip-api.com
+    (free, no key, 45 req/min/IP). Returns {} on any failure — enrichment
+    is opportunistic per spec §9, so misses are non-fatal.
+
+    The aggregator already caches results for 60s, so call volume to
+    ip-api.com stays bounded under normal use.
+    """
+    if not target:
+        return {}
+
+    ip = _resolve_target_to_ip(target)
+    if not ip:
+        return {}
+
+    try:
+        url = f"http://ip-api.com/json/{ip}?fields=status,message,country,org,as,query"
+        res = _requests.get(url, timeout=5)
+        if res.status_code != 200:
+            return {}
+        data = res.json()
+    except (_requests.RequestException, ValueError, OSError) as exc:
+        logger.warning("region_dossier ip-api lookup failed: %s", exc)
+        return {}
+
+    if data.get("status") != "success":
+        return {}
+
+    asn = _extract_asn_token(data.get("as") or "")
+    fields = {
+        "country": data.get("country"),
+        "asn": asn,
+        "org": data.get("org") or data.get("as"),
+    }
+    return {k: v for k, v in fields.items() if v}
+
+
+def _resolve_target_to_ip(target: str) -> str | None:
+    """URL/hostname/IP → IP. None on resolution failure."""
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+
+    if "://" in target:
+        host = (urlparse(target).hostname or "").strip()
+    else:
+        host = target.split("/", 1)[0].split(":", 1)[0].strip()
+
+    if not host:
+        return None
+
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        pass
+
+    try:
+        return socket.gethostbyname(host)
+    except (socket.gaierror, OSError):
+        return None
+
+
+def _extract_asn_token(as_field: str) -> str | None:
+    """'AS15169 Google LLC' → 'AS15169'. None if no AS-prefixed token."""
+    if not as_field or not as_field.strip():
+        return None
+    first = as_field.strip().split()[0]
+    return first if first.startswith("AS") else None
