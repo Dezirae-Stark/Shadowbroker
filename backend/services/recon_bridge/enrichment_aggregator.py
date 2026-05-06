@@ -163,6 +163,29 @@ class ShodanConnectorAdapter:
         return await loop.run_in_executor(None, func, target)
 
 
+class GeopoliticsAdapter:
+    """Async adapter around services.geopolitics.alerts_for_org_recon_bridge.
+
+    The wrapper reads the existing scheduler-populated GDELT cache; no
+    on-demand fetch happens in the request path. The thread executor
+    handles the lock acquisition + filter cleanly.
+    """
+
+    async def alerts(self, org: str) -> list[dict[str, Any]]:
+        try:
+            from services import geopolitics
+        except ImportError:
+            return []
+
+        func = getattr(geopolitics, "alerts_for_org_recon_bridge", None)
+        if func is None:
+            logger.warning("geopolitics.alerts_for_org_recon_bridge missing")
+            return []
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, func, org)
+
+
 class RegionDossierAdapter:
     """Async adapter around services.region_dossier.lookup_for_recon_bridge.
 

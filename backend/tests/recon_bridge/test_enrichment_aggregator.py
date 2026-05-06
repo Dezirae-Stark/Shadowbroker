@@ -314,3 +314,86 @@ class TestRegionDossierAdapter:
 
         monkeypatch.setattr(region_dossier._requests, "get", lambda *a, **kw: FakeResp())
         assert region_dossier.lookup_for_recon_bridge("8.8.8.8") == {}
+
+
+class TestGeopoliticsAdapter:
+    @pytest.mark.asyncio
+    async def test_adapter_returns_alerts_for_org(self, monkeypatch):
+        from services.recon_bridge.enrichment_aggregator import GeopoliticsAdapter
+
+        def fake_alerts(org: str, *, max_results: int = 10) -> list[dict]:
+            return [{"id": "evt-1", "headline": f"Event involving {org}"}]
+
+        monkeypatch.setattr(
+            "services.geopolitics.alerts_for_org_recon_bridge",
+            fake_alerts,
+            raising=False,
+        )
+        adapter = GeopoliticsAdapter()
+        alerts = await adapter.alerts("Example LLC")
+        assert len(alerts) == 1
+        assert "Example LLC" in alerts[0]["headline"]
+
+    def test_wrapper_substring_matches_actor(self, monkeypatch):
+        from services import geopolitics
+        from services.fetchers import _store
+
+        fake_features = [
+            {"properties": {"name": "Border skirmish", "actor1": "ACME CORPORATION",
+                            "actor2": "OTHER", "event_date": "20260301"}},
+            {"properties": {"name": "Unrelated event", "actor1": "FOO", "actor2": "BAR",
+                            "event_date": "20260301"}},
+        ]
+        monkeypatch.setitem(_store.latest_data, "gdelt", fake_features)
+        results = geopolitics.alerts_for_org_recon_bridge("Acme Corporation")
+        assert len(results) == 1
+        assert "ACME" in (results[0]["actor1"] or "")
+
+    def test_wrapper_substring_matches_headline(self, monkeypatch):
+        from services import geopolitics
+        from services.fetchers import _store
+
+        fake_features = [
+            {"properties": {"name": "Lockheed Martin announces new contract",
+                            "actor1": "USA", "actor2": "GOV", "event_date": "20260301"}},
+        ]
+        monkeypatch.setitem(_store.latest_data, "gdelt", fake_features)
+        results = geopolitics.alerts_for_org_recon_bridge("Lockheed Martin")
+        assert len(results) == 1
+        assert results[0]["headline"] == "Lockheed Martin announces new contract"
+
+    def test_wrapper_returns_empty_when_no_match(self, monkeypatch):
+        from services import geopolitics
+        from services.fetchers import _store
+
+        fake_features = [
+            {"properties": {"name": "Border skirmish", "actor1": "X", "actor2": "Y",
+                            "event_date": "20260301"}},
+        ]
+        monkeypatch.setitem(_store.latest_data, "gdelt", fake_features)
+        assert geopolitics.alerts_for_org_recon_bridge("UnrelatedCorp") == []
+
+    def test_wrapper_returns_empty_when_cache_empty(self, monkeypatch):
+        from services import geopolitics
+        from services.fetchers import _store
+
+        monkeypatch.setitem(_store.latest_data, "gdelt", [])
+        assert geopolitics.alerts_for_org_recon_bridge("Anything") == []
+
+    def test_wrapper_rejects_short_org_name(self):
+        from services import geopolitics
+        assert geopolitics.alerts_for_org_recon_bridge("US") == []
+        assert geopolitics.alerts_for_org_recon_bridge("") == []
+
+    def test_wrapper_respects_max_results(self, monkeypatch):
+        from services import geopolitics
+        from services.fetchers import _store
+
+        fake_features = [
+            {"properties": {"name": f"Event {i} mentions GlobalCorp",
+                            "actor1": "X", "actor2": "Y", "event_date": "20260301"}}
+            for i in range(20)
+        ]
+        monkeypatch.setitem(_store.latest_data, "gdelt", fake_features)
+        results = geopolitics.alerts_for_org_recon_bridge("GlobalCorp", max_results=5)
+        assert len(results) == 5

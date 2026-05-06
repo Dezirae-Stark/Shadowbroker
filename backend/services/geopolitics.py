@@ -709,3 +709,53 @@ def fetch_global_military_incidents():
     ) as e:
         logger.error(f"Error fetching GDELT data: {e}")
     return []
+
+
+def alerts_for_org_recon_bridge(org: str, *, max_results: int = 10) -> list[dict]:
+    """Recon-bridge filter on the scheduler-populated GDELT cache.
+
+    Reads latest_data['gdelt'] under _data_lock, substring-matches the org name
+    against feature properties (name, actor1, actor2), returns up to
+    max_results sanitized dicts. Empty list on any failure or no match.
+
+    Does NOT trigger an on-demand GDELT fetch — relies on the recurring
+    scheduler in services.fetchers.geo. If the cache is empty (scheduler
+    never ran), returns []. This keeps the recon-bridge request path fast
+    (~ms) instead of multi-second.
+    """
+    if not org or len(org.strip()) < 3:
+        return []
+    needle = org.strip().lower()
+
+    try:
+        from services.fetchers._store import latest_data, _data_lock
+        with _data_lock:
+            features = list(latest_data.get("gdelt") or [])
+    except (ImportError, AttributeError) as exc:
+        logger.warning("geopolitics recon-bridge cache read failed: %s", exc)
+        return []
+
+    matches: list[dict] = []
+    for feat in features:
+        if not isinstance(feat, dict):
+            continue
+        props = feat.get("properties") or {}
+        haystack = " ".join([
+            str(props.get("name") or ""),
+            str(props.get("actor1") or ""),
+            str(props.get("actor2") or ""),
+        ]).lower()
+        if needle not in haystack:
+            continue
+        urls = props.get("_urls") or []
+        matches.append({
+            "id": f"gdelt-{props.get('event_date', '')}-{len(matches)}",
+            "headline": props.get("name") or "",
+            "actor1": props.get("actor1"),
+            "actor2": props.get("actor2"),
+            "event_date": props.get("event_date"),
+            "url": urls[0] if urls else None,
+        })
+        if len(matches) >= max_results:
+            break
+    return matches
