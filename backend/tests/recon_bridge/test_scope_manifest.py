@@ -127,6 +127,41 @@ class TestValidate:
         assert result.in_scope is False
         assert "no scope rule matched" in result.reason
 
+    @pytest.mark.parametrize("cidr,expected", [
+        # Note: the default _manifest excludes 198.51.100.5/32 inside the
+        # 198.51.100.0/24 include. Strict semantics: any overlap with an
+        # exclude rejects, so /24 itself rejects. Use sub-CIDRs that don't
+        # overlap the excluded host for the True cases.
+        ("198.51.100.128/25", True),  # upper half of /24 — no exclude overlap
+        ("198.51.100.16/28", True),   # subnet that doesn't include .5
+        ("198.51.100.42/32", True),   # single host inside, not the excluded one
+        ("198.51.100.5/32", False),   # the excluded host itself
+        ("198.51.100.0/24", False),   # overlaps the excluded /32
+        ("10.0.0.0/24", False),       # outside include list entirely
+        ("198.51.0.0/16", False),     # superset (broader than authorized)
+    ])
+    def test_cidr_kind_validates_against_include_cidrs(self, cidr, expected):
+        """Codex R2: server-side scope_manifest had no kind=='cidr' branch.
+        Mirror of the deep-eye round-1 fix on the Shadowbroker side."""
+        m = _manifest()
+        result = m.validate(_target("cidr", cidr))
+        assert result.in_scope is expected, f"CIDR {cidr!r}: got {result}"
+
+    def test_cidr_overlapping_exclude_rejected(self):
+        d = _manifest_dict()
+        d["targets"]["exclude"] = {"ip_cidrs": ["198.51.100.0/26"]}
+        m = ScopeManifest.from_dict(d)
+        # /24 overlaps the excluded /26 — must reject even though /24
+        # would otherwise be in include.
+        result = m.validate(_target("cidr", "198.51.100.0/24"))
+        assert result.in_scope is False
+        assert "overlaps" in result.reason or "exclude" in result.reason.lower()
+
+    def test_cidr_malformed_rejected(self):
+        m = _manifest()
+        result = m.validate(_target("cidr", "not-a-cidr"))
+        assert result.in_scope is False
+
     def test_lab_mode_with_region_lock(self):
         d = _manifest_dict(mode="lab")
         d["lab"] = {"region_lock": "10.0.0.0/8"}

@@ -155,6 +155,22 @@ class ScopeManifest:
                         )
             except ValueError:
                 pass
+        if target.kind == "cidr":
+            # ANY overlap with an exclude_cidr rejects — operators must not
+            # be able to scope-check a network that contains excluded hosts.
+            # Codex R2 P2: mirror of the deep-eye round-1 fix on the server.
+            try:
+                requested = ipaddress.ip_network(host_or_ip, strict=False)
+                for net in self.exclude_cidrs:
+                    if requested.overlaps(net):
+                        return ScopeResult(
+                            False,
+                            f"overlaps excluded cidr {net}",
+                            self.manifest_id,
+                            self.mode,
+                        )
+            except ValueError:
+                pass
 
         # Rule 3: lab mode region_lock
         if self.mode == "lab" and self.lab_region_lock is not None:
@@ -194,6 +210,21 @@ class ScopeManifest:
                         return ScopeResult(
                             True,
                             f"matched cidr {net}",
+                            self.manifest_id,
+                            self.mode,
+                        )
+            except ValueError:
+                pass
+        if target.kind == "cidr":
+            # The requested CIDR must be a subnet of an include_cidr —
+            # i.e. fully contained, no hosts outside what was authorized.
+            try:
+                requested = ipaddress.ip_network(host_or_ip, strict=False)
+                for net in self.include_cidrs:
+                    if requested.subnet_of(net):
+                        return ScopeResult(
+                            True,
+                            f"cidr {requested} subnet of include cidr {net}",
                             self.manifest_id,
                             self.mode,
                         )
