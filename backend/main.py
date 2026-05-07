@@ -3110,6 +3110,17 @@ app.include_router(ai_intel_router)
 app.include_router(sar_router)
 app.include_router(infonet_router)
 
+# Recon-bridge for deep-eye integration. Opt-in: SHADOWBROKER_BRIDGE_ENABLED=true.
+# Fails closed at boot if enabled without HMAC keys or a scope manifest dir.
+try:
+    from services.recon_bridge.wiring import configure_bridge
+
+    configure_bridge(app)
+except Exception as _bridge_err:
+    # Fail-closed: BridgeBootError keeps /bridge/* unmounted rather than
+    # exposing a half-configured surface. Log loudly so misconfig is visible.
+    logger.error("recon-bridge wiring FAILED, /bridge/* will not be served: %s", _bridge_err)
+
 from services.data_fetcher import update_all_data
 
 _refresh_lock = threading.Lock()
