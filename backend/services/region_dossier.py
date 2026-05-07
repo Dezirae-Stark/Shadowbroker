@@ -312,15 +312,62 @@ def lookup_for_recon_bridge(target: str) -> dict:
 
 
 def _resolve_target_to_ip(target: str) -> str | None:
-    """URL/hostname/IP → IP. None on resolution failure."""
+    """URL/hostname/IP → IP. None on resolution failure.
+
+    Handles IPv6 literals correctly — splitting on ':' as the original
+    implementation did corrupted addresses like '2001:db8::1' into '2001'
+    (which socket.gethostbyname then treated as an integer-form IPv4).
+    Order matters here:
+      1. Try parsing as a literal IP first (catches bare IPv4 + IPv6).
+      2. urlparse for URL forms (it correctly handles bracketed IPv6).
+      3. Fall back to hostname:port stripping for the hostname-with-port
+         form, but ONLY if the leading segment is plausibly a hostname
+         (not a colon-laden IPv6 fragment).
+    """
     import ipaddress
     import socket
     from urllib.parse import urlparse
 
+    target = target.strip()
+
+    # 1) Bare literal IP (v4 or v6) — return as-is.
+    try:
+        ipaddress.ip_address(target)
+        return target
+    except ValueError:
+        pass
+
+    # 2) Bracketed IPv6 with optional port: '[2001:db8::1]:8080' or '[::1]'.
+    if target.startswith("["):
+        end = target.find("]")
+        if end > 0:
+            inner = target[1:end]
+            try:
+                ipaddress.ip_address(inner)
+                return inner
+            except ValueError:
+                return None
+
+    # 3) URL form — let urlparse extract the host.
     if "://" in target:
         host = (urlparse(target).hostname or "").strip()
-    else:
-        host = target.split("/", 1)[0].split(":", 1)[0].strip()
+        if not host:
+            return None
+        try:
+            ipaddress.ip_address(host)
+            return host
+        except ValueError:
+            pass
+        try:
+            return socket.gethostbyname(host)
+        except (socket.gaierror, OSError):
+            return None
+
+    # 4) hostname[:port] form. We only strip a single trailing ':port'
+    #    (and only if there's exactly one ':') so we don't shred IPv6.
+    host = target.split("/", 1)[0]
+    if host.count(":") == 1:
+        host = host.split(":", 1)[0]
 
     if not host:
         return None

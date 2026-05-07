@@ -292,6 +292,54 @@ class TestRegionDossierAdapter:
         monkeypatch.setattr("socket.gethostbyname", fake_gethostbyname)
         assert region_dossier.lookup_for_recon_bridge("nonexistent.example") == {}
 
+    def test_wrapper_preserves_ipv6_literal(self, monkeypatch):
+        """Codex P2: _resolve_target_to_ip used to split on ':' before
+        recognizing IPv6 literals, so '2001:4860:4860::8888' became '2001'.
+        The IP must be passed through unchanged for ip-api lookup."""
+        from services import region_dossier
+
+        captured = {}
+
+        class FakeResp:
+            status_code = 200
+            def json(self):
+                return {"status": "success", "country": "US", "org": "G", "as": "AS15169 G"}
+
+        def fake_get(url, *a, **kw):
+            captured["url"] = url
+            return FakeResp()
+
+        monkeypatch.setattr(region_dossier._requests, "get", fake_get)
+        region_dossier.lookup_for_recon_bridge("2001:4860:4860::8888")
+        # Whatever URL the wrapper builds, the IPv6 literal must appear
+        # intact — NOT truncated to "2001".
+        assert "2001:4860:4860::8888" in captured["url"], (
+            f"IPv6 literal corrupted in lookup URL: {captured['url']!r}"
+        )
+
+    def test_wrapper_strips_port_from_ipv4_hostport(self, monkeypatch):
+        """Sibling check: IPv4 with explicit :port still works after the
+        IPv6 fix (no regression on the original strip-on-colon behavior
+        for the hostname:port form)."""
+        from services import region_dossier
+
+        captured = {}
+
+        class FakeResp:
+            status_code = 200
+            def json(self):
+                return {"status": "success", "country": "US", "org": "G", "as": "AS1 X"}
+
+        def fake_get(url, *a, **kw):
+            captured["url"] = url
+            return FakeResp()
+
+        monkeypatch.setattr(region_dossier._requests, "get", fake_get)
+        region_dossier.lookup_for_recon_bridge("8.8.8.8:80")
+        # Port stripped; host preserved.
+        assert "8.8.8.8" in captured["url"]
+        assert ":80" not in captured["url"].split("8.8.8.8", 1)[1][:5]
+
     def test_wrapper_returns_empty_on_ip_api_failure(self, monkeypatch):
         from services import region_dossier
 
