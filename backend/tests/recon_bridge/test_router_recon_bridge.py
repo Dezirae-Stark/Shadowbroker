@@ -92,3 +92,82 @@ class TestScopeCheck:
     def test_malformed_request_422(self, app_client):
         resp = app_client.post("/bridge/scope/check", json={"target": {"kind": "url"}})
         assert resp.status_code == 422
+
+
+class TestEnrich:
+    def test_returns_aggregated_intel(self, app_client):
+        from routers import recon_bridge as rb
+        from services.recon_bridge.enrichment_aggregator import EnrichmentResult
+
+        class FakeAggregator:
+            async def aggregate(self, target):
+                return EnrichmentResult(
+                    target=target,
+                    resolved_ips=["1.2.3.4"],
+                    shodan={"ports": [80, 443]},
+                    geo={"country": "US", "asn": "AS15169", "org": "X LLC"},
+                    region_dossier={"country": "US"},
+                    geopolitics_alerts=[],
+                    ct_logs=[{"cn": target, "issuer": "Y CA"}],
+                    stale_after=1700000060.0,
+                )
+
+        rb.set_enrichment_aggregator(FakeAggregator())
+        try:
+            resp = app_client.get("/bridge/enrich/example.com")
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["target"] == "example.com"
+            assert body["resolved_ips"] == ["1.2.3.4"]
+            assert body["shodan"]["ports"] == [80, 443]
+            assert body["ct_logs"][0]["cn"] == "example.com"
+            assert body["stale_after"].endswith("+00:00")
+        finally:
+            rb.set_enrichment_aggregator(None)
+
+    def test_url_target_is_normalized_to_host(self, app_client):
+        from routers import recon_bridge as rb
+        from services.recon_bridge.enrichment_aggregator import EnrichmentResult
+
+        seen = {}
+
+        class CapturingAggregator:
+            async def aggregate(self, target):
+                seen["target"] = target
+                return EnrichmentResult(target=target, stale_after=1700000060.0)
+
+        rb.set_enrichment_aggregator(CapturingAggregator())
+        try:
+            resp = app_client.get("/bridge/enrich/" + "https%3A%2F%2Facme.com%2Fpath")
+            assert resp.status_code == 200
+            assert seen["target"] == "acme.com"
+        finally:
+            rb.set_enrichment_aggregator(None)
+
+    def test_aggregator_not_initialized_503(self, app_client):
+        from routers import recon_bridge as rb
+
+        rb.set_enrichment_aggregator(None)
+        resp = app_client.get("/bridge/enrich/example.com")
+        assert resp.status_code == 503
+        assert "aggregator" in resp.json()["detail"].lower()
+
+    def test_feed_errors_propagate_to_response(self, app_client):
+        from routers import recon_bridge as rb
+        from services.recon_bridge.enrichment_aggregator import EnrichmentResult
+
+        class FlakyAggregator:
+            async def aggregate(self, target):
+                return EnrichmentResult(
+                    target=target,
+                    feed_errors={"shodan": "timeout after 5.00s"},
+                    stale_after=1700000060.0,
+                )
+
+        rb.set_enrichment_aggregator(FlakyAggregator())
+        try:
+            resp = app_client.get("/bridge/enrich/example.com")
+            assert resp.status_code == 200
+            assert resp.json()["feed_errors"]["shodan"] == "timeout after 5.00s"
+        finally:
+            rb.set_enrichment_aggregator(None)
