@@ -221,6 +221,12 @@ async def _enforce_hmac(request: Request) -> None:
     canonicalize over an empty body, matching the deep-eye client which
     always hashes the body unconditionally.
 
+    PATH convention: decoded form. We use request.url.path (Starlette
+    auto-decodes), so the deep-eye client must sign the decoded canonical
+    path and URL-encode separately for wire transport. This keeps signatures
+    invariant under proxies that re-decode and avoids forcing clients to
+    pre-encode their target strings before signing.
+
     Replay protection is enabled when set_nonce_cache() has been called.
     Without a cache, replays are NOT blocked — Task 14 wires one at boot.
     """
