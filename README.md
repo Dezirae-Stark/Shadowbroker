@@ -6,6 +6,10 @@
   </p>
 </p>
 
+> **🔱 Fork notice — `Dezirae-Stark/Shadowbroker`**
+>
+> This fork carries the **recon-bridge integration** — an opt-in HMAC-signed `/bridge/*` channel that lets external vulnerability scanners (reference client: [`Dezirae-Stark/deep-eye`](https://github.com/Dezirae-Stark/deep-eye)) consult ShadowBroker for engagement-scope authorization and pre-scan OSINT enrichment. See **[Recon-Bridge.md](Recon-Bridge.md)** for setup and operations, or PR [#1](https://github.com/Dezirae-Stark/Shadowbroker/pull/1) for the diff against upstream. Existing deployments are unaffected unless `SHADOWBROKER_BRIDGE_ENABLED=true`.
+
 ---
 
 
