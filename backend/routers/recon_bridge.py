@@ -11,6 +11,7 @@ a test-only bypass toggleable via set_hmac_bypass_for_tests().
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -20,6 +21,11 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from services.recon_bridge.enrichment_aggregator import EnrichmentResult
+from services.recon_bridge.hmac_auth import (
+    BridgeAuthError,
+    NonceCache,
+    verify_request,
+)
 from services.recon_bridge.scope_manifest import (
     ScopeManifest,
     ScopeManifestError,
@@ -35,6 +41,8 @@ router = APIRouter(prefix="/bridge", tags=["recon-bridge"])
 _scope_dir: Optional[Path] = None
 _hmac_bypass = False
 _aggregator: Any = None
+_hmac_keys: dict[str, bytes] = {}
+_nonce_cache: Optional[NonceCache] = None
 
 
 def set_scope_manifest_dir(path: Path) -> None:
@@ -57,6 +65,40 @@ def set_enrichment_aggregator(agg: Any) -> None:
     by tests to assert the not-initialized branch)."""
     global _aggregator
     _aggregator = agg
+
+
+def set_hmac_keys(keys: dict[str, bytes]) -> None:
+    """Inject the {key_id: secret_bytes} map. Empty dict triggers env-var
+    fallback inside _enforce_hmac. Setter-provided keys always win."""
+    global _hmac_keys
+    _hmac_keys = dict(keys)
+
+
+def set_nonce_cache(cache: Optional[NonceCache]) -> None:
+    """Inject the replay-protection nonce cache. None disables replay
+    detection (used in early Plan A tasks before Task 13 wiring)."""
+    global _nonce_cache
+    _nonce_cache = cache
+
+
+def _resolve_keys() -> dict[str, bytes]:
+    """Setter-first, env-fallback. Env format: 'keyid:hex,keyid2:hex'."""
+    if _hmac_keys:
+        return _hmac_keys
+    raw = os.environ.get("RECON_BRIDGE_HMAC_KEYS", "").strip()
+    if not raw:
+        return {}
+    out: dict[str, bytes] = {}
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry or ":" not in entry:
+            continue
+        kid, hex_secret = entry.split(":", 1)
+        try:
+            out[kid.strip()] = bytes.fromhex(hex_secret.strip())
+        except ValueError:
+            logger.warning("RECON_BRIDGE_HMAC_KEYS: bad hex for key_id=%r", kid)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -174,11 +216,46 @@ async def enrich(target: str, request: Request) -> EnrichmentResponse:
 async def _enforce_hmac(request: Request) -> None:
     """Verify the inbound HMAC signature; raise HTTPException(401) on failure.
 
-    Wired up properly in Task 13 once we have the key store. For Plan A's
-    early endpoints, this is a placeholder that always rejects unless the
-    test bypass is active — production uses Task 13's real implementation.
+    Canonical string: METHOD\\nPATH\\nTIMESTAMP\\nSHA256(BODY) — both bridge
+    sides agree on this in services.recon_bridge.hmac_auth. GET requests
+    canonicalize over an empty body, matching the deep-eye client which
+    always hashes the body unconditionally.
+
+    Replay protection is enabled when set_nonce_cache() has been called.
+    Without a cache, replays are NOT blocked — Task 14 wires one at boot.
     """
-    raise HTTPException(
-        501,
-        "HMAC enforcement not yet wired (Task 13). Tests use set_hmac_bypass_for_tests(True).",
-    )
+    key_id = request.headers.get("X-Bridge-Key-Id")
+    timestamp = request.headers.get("X-Bridge-Timestamp")
+    signature = request.headers.get("X-Bridge-Signature")
+    if not (key_id and timestamp and signature):
+        raise HTTPException(401, "missing X-Bridge-* HMAC headers")
+
+    try:
+        ts_int = int(timestamp)
+    except ValueError:
+        raise HTTPException(401, "X-Bridge-Timestamp must be an integer")
+
+    keys = _resolve_keys()
+    secret = keys.get(key_id)
+    if secret is None:
+        raise HTTPException(401, f"unknown key_id={key_id!r}")
+
+    # FastAPI caches request.body() so the route handler can still read it.
+    body = await request.body()
+    try:
+        verify_request(
+            secret,
+            request.method,
+            request.url.path,
+            ts_int,
+            body,
+            signature,
+        )
+    except BridgeAuthError as exc:
+        raise HTTPException(401, str(exc))
+
+    if _nonce_cache is not None:
+        try:
+            _nonce_cache.assert_unseen(key_id, ts_int, signature)
+        except BridgeAuthError as exc:
+            raise HTTPException(401, str(exc))

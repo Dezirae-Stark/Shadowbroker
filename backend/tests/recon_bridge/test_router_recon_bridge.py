@@ -171,3 +171,207 @@ class TestEnrich:
             assert resp.json()["feed_errors"]["shodan"] == "timeout after 5.00s"
         finally:
             rb.set_enrichment_aggregator(None)
+
+
+# ---------------------------------------------------------------------------
+# Task 13 — real HMAC enforcement
+#
+# These tests use a *separate* app fixture that leaves bypass OFF, configures
+# keys via set_hmac_keys(), and signs requests with the real primitives from
+# services.recon_bridge.hmac_auth. They exercise the verifier wiring rather
+# than the crypto itself (which is covered by test_hmac_auth.py).
+# ---------------------------------------------------------------------------
+
+import hashlib
+import json as _json
+import time as _time
+
+KEY_ID = "test-key-1"
+KEY_BYTES = b"super-secret-bridge-key-32-bytes-long-xx"
+
+
+@pytest.fixture
+def signed_app_client(manifest_dir: Path, monkeypatch):
+    """FastAPI client with real HMAC enforcement enabled (no bypass)."""
+    from fastapi import FastAPI
+    from routers.recon_bridge import (
+        router,
+        set_scope_manifest_dir,
+        set_hmac_bypass_for_tests,
+        set_hmac_keys,
+        set_nonce_cache,
+    )
+    from services.recon_bridge.hmac_auth import NonceCache
+
+    # Ensure no env-var bleed.
+    monkeypatch.delenv("RECON_BRIDGE_HMAC_KEYS", raising=False)
+    set_scope_manifest_dir(manifest_dir)
+    set_hmac_bypass_for_tests(False)
+    set_hmac_keys({KEY_ID: KEY_BYTES})
+    set_nonce_cache(NonceCache(max_size=128, ttl_seconds=300))
+
+    app = FastAPI()
+    app.include_router(router)
+    yield TestClient(app)
+
+    set_hmac_keys({})
+    set_nonce_cache(None)
+    set_hmac_bypass_for_tests(False)
+
+
+def _sign(method: str, path: str, body: bytes, *, ts: int | None = None, key_id: str = KEY_ID, key: bytes = KEY_BYTES) -> dict[str, str]:
+    """Build the X-Bridge-* headers for a request."""
+    from services.recon_bridge.hmac_auth import sign_request
+
+    if ts is None:
+        ts = int(_time.time())
+    sig = sign_request(key, method, path, ts, body)
+    return {
+        "X-Bridge-Key-Id": key_id,
+        "X-Bridge-Timestamp": str(ts),
+        "X-Bridge-Signature": sig,
+    }
+
+
+class TestHmacEnforcement:
+    def test_missing_headers_returns_401(self, signed_app_client):
+        resp = signed_app_client.get("/bridge/enrich/example.com")
+        assert resp.status_code == 401
+        assert "header" in resp.json()["detail"].lower() or "missing" in resp.json()["detail"].lower()
+
+    def test_unknown_key_id_returns_401(self, signed_app_client):
+        headers = _sign("GET", "/bridge/enrich/example.com", b"", key_id="not-a-real-key")
+        resp = signed_app_client.get("/bridge/enrich/example.com", headers=headers)
+        assert resp.status_code == 401
+        assert "key" in resp.json()["detail"].lower()
+
+    def test_bad_signature_returns_401(self, signed_app_client):
+        headers = _sign("GET", "/bridge/enrich/example.com", b"")
+        headers["X-Bridge-Signature"] = "deadbeef" * 8
+        resp = signed_app_client.get("/bridge/enrich/example.com", headers=headers)
+        assert resp.status_code == 401
+
+    def test_stale_timestamp_returns_401(self, signed_app_client):
+        old_ts = int(_time.time()) - 600  # 10 min in the past
+        headers = _sign("GET", "/bridge/enrich/example.com", b"", ts=old_ts)
+        resp = signed_app_client.get("/bridge/enrich/example.com", headers=headers)
+        assert resp.status_code == 401
+        assert "timestamp" in resp.json()["detail"].lower() or "window" in resp.json()["detail"].lower()
+
+    def test_valid_get_passes(self, signed_app_client):
+        from routers import recon_bridge as rb
+        from services.recon_bridge.enrichment_aggregator import EnrichmentResult
+
+        class FakeAggregator:
+            async def aggregate(self, target):
+                return EnrichmentResult(target=target, stale_after=1700000060.0)
+
+        rb.set_enrichment_aggregator(FakeAggregator())
+        try:
+            headers = _sign("GET", "/bridge/enrich/example.com", b"")
+            resp = signed_app_client.get("/bridge/enrich/example.com", headers=headers)
+            assert resp.status_code == 200
+        finally:
+            rb.set_enrichment_aggregator(None)
+
+    def test_valid_post_passes(self, signed_app_client):
+        body_obj = {
+            "target": {"kind": "url", "value": "https://acme.com"},
+            "scope_token": "engagement-test",
+        }
+        body = _json.dumps(body_obj).encode("utf-8")
+        headers = _sign("POST", "/bridge/scope/check", body)
+        headers["Content-Type"] = "application/json"
+        resp = signed_app_client.post("/bridge/scope/check", content=body, headers=headers)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["in_scope"] is True
+
+    def test_replay_returns_401(self, signed_app_client):
+        from routers import recon_bridge as rb
+        from services.recon_bridge.enrichment_aggregator import EnrichmentResult
+
+        class FakeAggregator:
+            async def aggregate(self, target):
+                return EnrichmentResult(target=target, stale_after=1700000060.0)
+
+        rb.set_enrichment_aggregator(FakeAggregator())
+        try:
+            headers = _sign("GET", "/bridge/enrich/example.com", b"")
+            r1 = signed_app_client.get("/bridge/enrich/example.com", headers=headers)
+            assert r1.status_code == 200
+            r2 = signed_app_client.get("/bridge/enrich/example.com", headers=headers)
+            assert r2.status_code == 401
+            assert "replay" in r2.json()["detail"].lower()
+        finally:
+            rb.set_enrichment_aggregator(None)
+
+    def test_env_fallback_loads_keys_when_setter_empty(self, manifest_dir: Path, monkeypatch):
+        """When no setter call has been made, _enforce_hmac falls back to env var."""
+        from fastapi import FastAPI
+        from routers.recon_bridge import (
+            router,
+            set_scope_manifest_dir,
+            set_hmac_bypass_for_tests,
+            set_hmac_keys,
+            set_nonce_cache,
+        )
+        from services.recon_bridge.hmac_auth import NonceCache
+        from services.recon_bridge.enrichment_aggregator import EnrichmentResult
+        from routers import recon_bridge as rb
+
+        env_key_hex = KEY_BYTES.hex()
+        monkeypatch.setenv("RECON_BRIDGE_HMAC_KEYS", f"env-key:{env_key_hex}")
+        set_scope_manifest_dir(manifest_dir)
+        set_hmac_bypass_for_tests(False)
+        set_hmac_keys({})  # explicitly empty so fallback engages
+        set_nonce_cache(NonceCache())
+
+        app = FastAPI()
+        app.include_router(router)
+        client = TestClient(app)
+
+        class FakeAggregator:
+            async def aggregate(self, target):
+                return EnrichmentResult(target=target, stale_after=1700000060.0)
+
+        rb.set_enrichment_aggregator(FakeAggregator())
+        try:
+            headers = _sign("GET", "/bridge/enrich/example.com", b"", key_id="env-key")
+            resp = client.get("/bridge/enrich/example.com", headers=headers)
+            assert resp.status_code == 200
+        finally:
+            rb.set_enrichment_aggregator(None)
+            set_hmac_keys({})
+            set_nonce_cache(None)
+
+    def test_setter_overrides_env(self, manifest_dir: Path, monkeypatch):
+        """Setter-provided keys must win over env. We set env to a key_id that
+        does NOT exist in the setter map; signing with that env key must 401."""
+        from fastapi import FastAPI
+        from routers.recon_bridge import (
+            router,
+            set_scope_manifest_dir,
+            set_hmac_bypass_for_tests,
+            set_hmac_keys,
+            set_nonce_cache,
+        )
+        from services.recon_bridge.hmac_auth import NonceCache
+
+        monkeypatch.setenv("RECON_BRIDGE_HMAC_KEYS", f"env-only:{KEY_BYTES.hex()}")
+        set_scope_manifest_dir(manifest_dir)
+        set_hmac_bypass_for_tests(False)
+        set_hmac_keys({"setter-only": KEY_BYTES})
+        set_nonce_cache(NonceCache())
+
+        app = FastAPI()
+        app.include_router(router)
+        client = TestClient(app)
+
+        try:
+            # Sign with the env-only key id; the setter map doesn't know it.
+            headers = _sign("GET", "/bridge/enrich/example.com", b"", key_id="env-only")
+            resp = client.get("/bridge/enrich/example.com", headers=headers)
+            assert resp.status_code == 401
+        finally:
+            set_hmac_keys({})
+            set_nonce_cache(None)
