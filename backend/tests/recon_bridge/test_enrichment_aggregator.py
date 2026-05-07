@@ -246,9 +246,10 @@ class TestRegionDossierAdapter:
 
         captured = {}
 
-        def fake_gethostbyname(host: str) -> str:
+        def fake_getaddrinfo(host, port, *args, **kwargs):
+            import socket as _s
             captured["host"] = host
-            return "1.2.3.4"
+            return [(_s.AF_INET, _s.SOCK_STREAM, 0, "", ("1.2.3.4", 0))]
 
         class FakeResp:
             status_code = 200
@@ -256,7 +257,7 @@ class TestRegionDossierAdapter:
                 captured["url_called"] = True
                 return {"status": "success", "country": "X", "org": "Y", "as": "AS1 Z"}
 
-        monkeypatch.setattr("socket.gethostbyname", fake_gethostbyname)
+        monkeypatch.setattr("socket.getaddrinfo", fake_getaddrinfo)
         monkeypatch.setattr(region_dossier._requests, "get", lambda *a, **kw: FakeResp())
         result = region_dossier.lookup_for_recon_bridge("example.com")
         assert captured["host"] == "example.com"
@@ -268,16 +269,17 @@ class TestRegionDossierAdapter:
 
         captured = {}
 
-        def fake_gethostbyname(host: str) -> str:
+        def fake_getaddrinfo(host, port, *args, **kwargs):
+            import socket as _s
             captured["host"] = host
-            return "1.2.3.4"
+            return [(_s.AF_INET, _s.SOCK_STREAM, 0, "", ("1.2.3.4", 0))]
 
         class FakeResp:
             status_code = 200
             def json(self):
                 return {"status": "success", "country": "X", "org": "Y", "as": "AS1 Z"}
 
-        monkeypatch.setattr("socket.gethostbyname", fake_gethostbyname)
+        monkeypatch.setattr("socket.getaddrinfo", fake_getaddrinfo)
         monkeypatch.setattr(region_dossier._requests, "get", lambda *a, **kw: FakeResp())
         region_dossier.lookup_for_recon_bridge("https://api.example.com/path?q=1")
         assert captured["host"] == "api.example.com"
@@ -286,10 +288,10 @@ class TestRegionDossierAdapter:
         from services import region_dossier
         import socket
 
-        def fake_gethostbyname(host: str) -> str:
+        def fake_getaddrinfo(host, port, *args, **kwargs):
             raise socket.gaierror("nope")
 
-        monkeypatch.setattr("socket.gethostbyname", fake_gethostbyname)
+        monkeypatch.setattr("socket.getaddrinfo", fake_getaddrinfo)
         assert region_dossier.lookup_for_recon_bridge("nonexistent.example") == {}
 
     def test_wrapper_preserves_ipv6_literal(self, monkeypatch):
@@ -316,6 +318,47 @@ class TestRegionDossierAdapter:
         assert "2001:4860:4860::8888" in captured["url"], (
             f"IPv6 literal corrupted in lookup URL: {captured['url']!r}"
         )
+
+    def test_wrapper_resolves_ipv6_only_hostname(self, monkeypatch):
+        """Codex R2 P2: socket.gethostbyname is IPv4-only, so IPv6-only
+        domains used to silently return {} instead of enrichment data.
+        Switching to getaddrinfo gives us dual-stack resolution."""
+        from services import region_dossier
+        import socket
+
+        captured = {}
+
+        def fake_getaddrinfo(host, port, *args, **kwargs):
+            # Simulate an AAAA-only domain.
+            if host == "ipv6only.example":
+                return [(socket.AF_INET6, socket.SOCK_STREAM, 0, "",
+                         ("2001:db8::1", 0, 0, 0))]
+            return []
+
+        # Block the IPv4-only path so we know the test is exercising
+        # the new code path.
+        def fake_gethostbyname(host):
+            raise socket.gaierror("ipv4-only path must not be used")
+
+        class FakeResp:
+            status_code = 200
+            def json(self):
+                return {"status": "success", "country": "US", "org": "X", "as": "AS1 Y"}
+
+        def fake_get(url, *a, **kw):
+            captured["url"] = url
+            return FakeResp()
+
+        monkeypatch.setattr("socket.getaddrinfo", fake_getaddrinfo)
+        monkeypatch.setattr("socket.getaddrinfo", fake_getaddrinfo)
+        monkeypatch.setattr(region_dossier._requests, "get", fake_get)
+        result = region_dossier.lookup_for_recon_bridge("ipv6only.example")
+        # The IPv6 address must be passed to ip-api in the lookup URL.
+        assert "2001:db8::1" in captured["url"], (
+            f"IPv6-only hostname not resolved via dual-stack lookup: {captured.get('url')!r}"
+        )
+        # And we got real enrichment back, not the silent {}.
+        assert result.get("country") == "US"
 
     def test_wrapper_strips_port_from_ipv4_hostport(self, monkeypatch):
         """Sibling check: IPv4 with explicit :port still works after the

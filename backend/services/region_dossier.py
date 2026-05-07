@@ -358,10 +358,7 @@ def _resolve_target_to_ip(target: str) -> str | None:
             return host
         except ValueError:
             pass
-        try:
-            return socket.gethostbyname(host)
-        except (socket.gaierror, OSError):
-            return None
+        return _resolve_dualstack(host)
 
     # 4) hostname[:port] form. We only strip a single trailing ':port'
     #    (and only if there's exactly one ':') so we don't shred IPv6.
@@ -378,10 +375,28 @@ def _resolve_target_to_ip(target: str) -> str | None:
     except ValueError:
         pass
 
+    return _resolve_dualstack(host)
+
+
+def _resolve_dualstack(host: str) -> str | None:
+    """Resolve a hostname to an IPv4 or IPv6 address.
+
+    Codex R2 P2: socket.gethostbyname() only handles A records (IPv4),
+    so AAAA-only domains used to return None and silently drop enrichment.
+    getaddrinfo handles both families in one call.
+    """
+    import socket
+
     try:
-        return socket.gethostbyname(host)
+        infos = socket.getaddrinfo(host, None)
     except (socket.gaierror, OSError):
         return None
+    for family, _socktype, _proto, _canon, sockaddr in infos:
+        if family == socket.AF_INET and sockaddr:
+            return sockaddr[0]
+        if family == socket.AF_INET6 and sockaddr:
+            return sockaddr[0]
+    return None
 
 
 def _extract_asn_token(as_field: str) -> str | None:
