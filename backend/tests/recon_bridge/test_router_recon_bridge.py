@@ -145,6 +145,19 @@ class TestScopeCheck:
         resp = app_client.post("/bridge/scope/check", json={"target": {"kind": "url"}})
         assert resp.status_code == 422
 
+    def test_pin_kind_rejected_at_schema(self, app_client):
+        """Codex R3 P2: 'pin' was advertised in the kind regex but
+        ScopeManifest.validate has no pin branch — every pin request fell
+        through to in_scope:false. Schema must reject pin so behavior and
+        documentation stay consistent."""
+        resp = app_client.post("/bridge/scope/check", json={
+            "target": {"kind": "pin", "value": "anything"},
+            "scope_token": "engagement-test",
+        })
+        assert resp.status_code == 422, (
+            f"pin kind should fail schema validation, got {resp.status_code}: {resp.text}"
+        )
+
 
 class TestEnrich:
     def test_returns_aggregated_intel(self, app_client):

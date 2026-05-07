@@ -136,7 +136,11 @@ def _resolve_keys() -> dict[str, bytes]:
 # ---------------------------------------------------------------------------
 
 class TargetIn(BaseModel):
-    kind: str = Field(..., pattern=r"^(url|ip|cidr|asn|pin)$")
+    # Codex R3 P2: 'pin' was previously advertised in this regex but
+    # ScopeManifest.validate has no pin branch — every pin request returned
+    # in_scope:false silently. If pin semantics are ever defined, add the
+    # validator branch here AND in ScopeManifest.validate together.
+    kind: str = Field(..., pattern=r"^(url|ip|cidr|asn)$")
     value: str = Field(..., min_length=1)
 
 
