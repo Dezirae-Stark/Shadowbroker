@@ -489,6 +489,72 @@ class TestGeopoliticsAdapter:
         results = geopolitics.alerts_for_org_recon_bridge("GlobalCorp", max_results=5)
         assert len(results) == 5
 
+    # Codex R3 P2: alerts_for_org_recon_bridge read props["_urls"], but the
+    # GDELT pipeline (_build_feature_html) pops _urls and stores the URLs
+    # under _urls_list. Production cache features have _urls_list populated
+    # and _urls absent, so the recon-bridge response always returned url=None.
+    def test_wrapper_returns_url_from_urls_list(self, monkeypatch):
+        """Production-shape feature (post _build_feature_html): _urls is
+        gone, _urls_list holds the article URLs. The recon-bridge response
+        must surface the first URL."""
+        from services import geopolitics
+        from services.fetchers import _store
+
+        fake_features = [
+            {"properties": {
+                "name": "Acme breach reported",
+                "actor1": "ACME CORP",
+                "actor2": "ATTACKER",
+                "event_date": "20260301",
+                # Post-processing shape: _urls_list, no _urls.
+                "_urls_list": [
+                    "https://news.example.com/acme-breach",
+                    "https://other.example.com/coverage",
+                ],
+            }},
+        ]
+        monkeypatch.setitem(_store.latest_data, "gdelt", fake_features)
+        results = geopolitics.alerts_for_org_recon_bridge("Acme Corp")
+        assert len(results) == 1
+        assert results[0]["url"] == "https://news.example.com/acme-breach", (
+            f"expected first _urls_list entry, got {results[0].get('url')!r}"
+        )
+
+    def test_wrapper_falls_back_to_legacy_urls_field(self, monkeypatch):
+        """Pre-processed feature (still has raw _urls, no _urls_list yet)
+        must still produce a url. Defensive: fetcher might race with the
+        recon-bridge read."""
+        from services import geopolitics
+        from services.fetchers import _store
+
+        fake_features = [
+            {"properties": {
+                "name": "Acme event",
+                "actor1": "ACME",
+                "actor2": "X",
+                "event_date": "20260301",
+                "_urls": ["https://raw.example.com/acme"],
+            }},
+        ]
+        monkeypatch.setitem(_store.latest_data, "gdelt", fake_features)
+        results = geopolitics.alerts_for_org_recon_bridge("Acme")
+        assert len(results) == 1
+        assert results[0]["url"] == "https://raw.example.com/acme"
+
+    def test_wrapper_url_is_none_when_no_urls(self, monkeypatch):
+        """Feature with neither _urls nor _urls_list: url=None, no crash."""
+        from services import geopolitics
+        from services.fetchers import _store
+
+        fake_features = [
+            {"properties": {"name": "Acme event", "actor1": "ACME",
+                            "actor2": "X", "event_date": "20260301"}},
+        ]
+        monkeypatch.setitem(_store.latest_data, "gdelt", fake_features)
+        results = geopolitics.alerts_for_org_recon_bridge("Acme")
+        assert len(results) == 1
+        assert results[0]["url"] is None
+
 
 class TestCTLogsAdapter:
     @pytest.mark.asyncio
