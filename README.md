@@ -6,6 +6,10 @@
   </p>
 </p>
 
+> **🔱 Fork notice — `Dezirae-Stark/Shadowbroker`**
+>
+> This fork carries the **recon-bridge integration** — an opt-in HMAC-signed `/bridge/*` channel that lets external vulnerability scanners (reference client: [`Dezirae-Stark/deep-eye`](https://github.com/Dezirae-Stark/deep-eye)) consult ShadowBroker for engagement-scope authorization and pre-scan OSINT enrichment. See **[Recon-Bridge.md](Recon-Bridge.md)** for setup and operations, or PR [#1](https://github.com/Dezirae-Stark/Shadowbroker/pull/1) for the diff against upstream. Existing deployments are unaffected unless `SHADOWBROKER_BRIDGE_ENABLED=true`.
+
 ---
 
 
@@ -363,6 +367,18 @@ v0.9.7 turns ShadowBroker from a dashboard a human watches into an intelligence 
 * **Auditable** — Every channel call is logged; the operator can introspect what the agent has done.
 
 **Connect an agent:** Open the AI Intel panel in the left sidebar, click **Connect Agent**, and copy the HMAC secret. From there, point any compatible agent at the channel — for OpenClaw, import `ShadowBrokerClient` from the OpenClaw skill package; for any other agent, use the same HMAC contract documented above (timestamp + nonce + body digest, tier-gated). The channel is the protocol, not the agent.
+
+### 🔍 Recon Bridge — Pre-Scan Enrichment for External Scanners (NEW)
+
+A separate, opt-in HMAC channel for **external vulnerability scanners** to consult ShadowBroker before they scan a target. Different shape from the OpenClaw command channel: the recon bridge is read-only enrichment plus a scope-authorization gate.
+
+* **Scope authorization** — `POST /bridge/scope/check` validates a target against an engagement scope manifest (mandatory expiry, include/exclude lists, lab region locks). Scanners refuse to run if the answer is "out of scope".
+* **OSINT enrichment** — `GET /bridge/enrich/{target}` returns aggregated intel from existing ShadowBroker feeds: Shodan host data, region dossier (country/ASN/org), CT log entries, and geopolitics alerts. Each feed runs under its own 5s timeout; partial results return with `feed_errors` rather than failing the whole call.
+* **HMAC-SHA256 + replay protection** — same canonical string as the OpenClaw channel; signatures are cross-compatible with `services/recon_bridge/hmac_auth.py`.
+* **Opt-in** — `SHADOWBROKER_BRIDGE_ENABLED=true` mounts `/bridge/*`; otherwise it stays unmounted. Existing deployments are unaffected.
+* **Reference client** — `deep-eye` ships a synchronous `ShadowbrokerClient` and a CLI integration; any HTTP client that signs the canonical string works.
+
+See **[Recon-Bridge.md](Recon-Bridge.md)** for setup, key rotation, scope manifest authoring, and troubleshooting.
 
 ### ⏱️ Time Machine — Snapshot Playback (NEW in v0.9.7)
 

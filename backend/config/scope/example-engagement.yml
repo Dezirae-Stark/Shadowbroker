@@ -1,0 +1,28 @@
+# Example scope manifest for the recon bridge.
+# See docs/superpowers/specs/2026-05-05-shadowbroker-integration-design.md §7.
+
+version: 1
+manifest_id: "example-engagement-2026-q2"
+mode: engagement
+created_at: "2026-04-01T00:00:00Z"
+expires_at: "2026-07-01T00:00:00Z" # MANDATORY — no exceptions, no "never"
+
+authorization:
+  contract_ref: "Replace this with your engagement reference"
+  contact: "you@example.com"
+  signing_key_fingerprint: "sha256:replace-with-real-fingerprint"
+
+targets:
+  include:
+    domains:
+      - "example.com"
+      - "*.example.com"
+    ip_cidrs:
+      - "198.51.100.0/24"
+    asns:
+      - "AS64512"
+  exclude:
+    domains:
+      - "payroll.example.com"
+    ip_cidrs:
+      - "198.51.100.5/32"

@@ -270,3 +270,138 @@ def get_region_dossier(lat: float, lng: float) -> dict:
 
     dossier_cache[cache_key] = result
     return result
+
+
+def lookup_for_recon_bridge(target: str) -> dict:
+    """Recon-bridge GeoIP lookup. Returns at most {country, asn, org}.
+
+    Resolves hostname/URL targets to an IP via DNS, then queries ip-api.com
+    (free, no key, 45 req/min/IP). Returns {} on any failure — enrichment
+    is opportunistic per spec §9, so misses are non-fatal.
+
+    The aggregator already caches results for 60s, so call volume to
+    ip-api.com stays bounded under normal use.
+    """
+    if not target:
+        return {}
+
+    ip = _resolve_target_to_ip(target)
+    if not ip:
+        return {}
+
+    try:
+        url = f"http://ip-api.com/json/{ip}?fields=status,message,country,org,as,query"
+        res = _requests.get(url, timeout=5)
+        if res.status_code != 200:
+            return {}
+        data = res.json()
+    except (_requests.RequestException, ValueError, OSError) as exc:
+        logger.warning("region_dossier ip-api lookup failed: %s", exc)
+        return {}
+
+    if data.get("status") != "success":
+        return {}
+
+    asn = _extract_asn_token(data.get("as") or "")
+    fields = {
+        "country": data.get("country"),
+        "asn": asn,
+        "org": data.get("org") or data.get("as"),
+    }
+    return {k: v for k, v in fields.items() if v}
+
+
+def _resolve_target_to_ip(target: str) -> str | None:
+    """URL/hostname/IP → IP. None on resolution failure.
+
+    Handles IPv6 literals correctly — splitting on ':' as the original
+    implementation did corrupted addresses like '2001:db8::1' into '2001'
+    (which socket.gethostbyname then treated as an integer-form IPv4).
+    Order matters here:
+      1. Try parsing as a literal IP first (catches bare IPv4 + IPv6).
+      2. urlparse for URL forms (it correctly handles bracketed IPv6).
+      3. Fall back to hostname:port stripping for the hostname-with-port
+         form, but ONLY if the leading segment is plausibly a hostname
+         (not a colon-laden IPv6 fragment).
+    """
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+
+    target = target.strip()
+
+    # 1) Bare literal IP (v4 or v6) — return as-is.
+    try:
+        ipaddress.ip_address(target)
+        return target
+    except ValueError:
+        pass
+
+    # 2) Bracketed IPv6 with optional port: '[2001:db8::1]:8080' or '[::1]'.
+    if target.startswith("["):
+        end = target.find("]")
+        if end > 0:
+            inner = target[1:end]
+            try:
+                ipaddress.ip_address(inner)
+                return inner
+            except ValueError:
+                return None
+
+    # 3) URL form — let urlparse extract the host.
+    if "://" in target:
+        host = (urlparse(target).hostname or "").strip()
+        if not host:
+            return None
+        try:
+            ipaddress.ip_address(host)
+            return host
+        except ValueError:
+            pass
+        return _resolve_dualstack(host)
+
+    # 4) hostname[:port] form. We only strip a single trailing ':port'
+    #    (and only if there's exactly one ':') so we don't shred IPv6.
+    host = target.split("/", 1)[0]
+    if host.count(":") == 1:
+        host = host.split(":", 1)[0]
+
+    if not host:
+        return None
+
+    try:
+        ipaddress.ip_address(host)
+        return host
+    except ValueError:
+        pass
+
+    return _resolve_dualstack(host)
+
+
+def _resolve_dualstack(host: str) -> str | None:
+    """Resolve a hostname to an IPv4 or IPv6 address.
+
+    Codex R2 P2: socket.gethostbyname() only handles A records (IPv4),
+    so AAAA-only domains used to return None and silently drop enrichment.
+    getaddrinfo handles both families in one call.
+    """
+    import socket
+
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except (socket.gaierror, OSError):
+        return None
+    for family, _socktype, _proto, _canon, sockaddr in infos:
+        if family == socket.AF_INET and sockaddr:
+            return sockaddr[0]
+        if family == socket.AF_INET6 and sockaddr:
+            return sockaddr[0]
+    return None
+
+
+def _extract_asn_token(as_field: str) -> str | None:
+    """'AS15169 Google LLC' → 'AS15169'. None if no AS-prefixed token."""
+    if not as_field or not as_field.strip():
+        return None
+    first = as_field.strip().split()[0]
+    return first if first.startswith("AS") else None

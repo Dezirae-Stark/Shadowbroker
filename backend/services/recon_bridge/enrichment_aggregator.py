@@ -1,0 +1,249 @@
+"""Aggregate Shadowbroker OSINT feeds into a single enrichment record.
+
+Feeds are called in parallel via asyncio.gather. Each feed runs under its own
+asyncio.wait_for budget (default 5s) so a single hung upstream cannot block the
+whole aggregate call. Any feed exception OR timeout is caught, recorded under
+feed_errors, and the rest of the result still returns. The cache is per-target,
+in-memory, and shared across requests.
+
+Geopolitics is sequenced *after* region dossier because it keys on the org
+field. This means total latency ~= max(shodan, region, ct) + geopolitics.
+Concurrent-request coalescing (in-flight dedup) is intentionally deferred —
+mocked-feed traffic doesn't justify it yet (Plan A Task 07 design note).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import time
+from dataclasses import dataclass, field
+from typing import Any, Optional, Protocol
+
+import httpx
+
+logger = logging.getLogger(__name__)
+
+
+class ShodanFeed(Protocol):
+    async def lookup(self, target: str) -> dict[str, Any]: ...
+
+
+class RegionDossierFeed(Protocol):
+    async def lookup(self, target: str) -> dict[str, Any]: ...
+
+
+class GeopoliticsFeed(Protocol):
+    async def alerts(self, org: str) -> list[dict[str, Any]]: ...
+
+
+class CTFeed(Protocol):
+    async def certificates(self, target: str) -> list[dict[str, Any]]: ...
+
+
+@dataclass
+class EnrichmentResult:
+    target: str
+    resolved_ips: list[str] = field(default_factory=list)
+    shodan: Optional[dict[str, Any]] = None
+    geo: Optional[dict[str, Any]] = None
+    region_dossier: Optional[dict[str, Any]] = None
+    geopolitics_alerts: list[dict[str, Any]] = field(default_factory=list)
+    ct_logs: list[dict[str, Any]] = field(default_factory=list)
+    feed_errors: dict[str, str] = field(default_factory=dict)
+    stale_after: float = 0.0
+
+
+@dataclass
+class _FeedError:
+    detail: str
+
+
+class EnrichmentAggregator:
+    def __init__(
+        self,
+        *,
+        shodan: ShodanFeed,
+        region_dossier: RegionDossierFeed,
+        geopolitics: GeopoliticsFeed,
+        ct_logs: CTFeed,
+        cache_ttl_seconds: int = 60,
+        feed_timeout_seconds: float = 5.0,
+    ) -> None:
+        self._shodan = shodan
+        self._region = region_dossier
+        self._geo = geopolitics
+        self._ct = ct_logs
+        self._ttl = cache_ttl_seconds
+        self._timeout = feed_timeout_seconds
+        self._cache: dict[str, tuple[float, EnrichmentResult]] = {}
+
+    async def aggregate(self, target: str) -> EnrichmentResult:
+        now = time.time()
+        cached = self._cache.get(target)
+        if cached and cached[0] > now:
+            return cached[1]
+
+        result = EnrichmentResult(target=target, stale_after=now + self._ttl)
+
+        shodan_data, region_data, ct_data = await asyncio.gather(
+            self._safe(self._shodan.lookup(target), "shodan"),
+            self._safe(self._region.lookup(target), "region_dossier"),
+            self._safe(self._ct.certificates(target), "ct_logs"),
+        )
+
+        if isinstance(shodan_data, dict):
+            result.shodan = shodan_data
+            ip = shodan_data.get("ip_str") or shodan_data.get("ip")
+            if ip:
+                result.resolved_ips = [ip]
+        elif isinstance(shodan_data, _FeedError):
+            result.feed_errors["shodan"] = shodan_data.detail
+
+        if isinstance(region_data, dict):
+            result.region_dossier = region_data
+            geo = {
+                k: region_data.get(k) for k in ("country", "asn", "org")
+                if region_data.get(k) is not None
+            }
+            result.geo = geo or None
+        elif isinstance(region_data, _FeedError):
+            result.feed_errors["region_dossier"] = region_data.detail
+
+        if isinstance(ct_data, list):
+            result.ct_logs = ct_data
+        elif isinstance(ct_data, _FeedError):
+            result.feed_errors["ct_logs"] = ct_data.detail
+
+        org = (result.geo or {}).get("org") if result.geo else None
+        if org:
+            geo_alerts = await self._safe(self._geo.alerts(org), "geopolitics")
+            if isinstance(geo_alerts, list):
+                result.geopolitics_alerts = geo_alerts
+            elif isinstance(geo_alerts, _FeedError):
+                result.feed_errors["geopolitics"] = geo_alerts.detail
+
+        self._cache[target] = (now + self._ttl, result)
+        return result
+
+    async def _safe(self, coro, name: str):
+        try:
+            return await asyncio.wait_for(coro, timeout=self._timeout)
+        except asyncio.TimeoutError:
+            logger.warning("Enrichment feed %s timed out after %.2fs", name, self._timeout)
+            return _FeedError(detail=f"timeout after {self._timeout:.2f}s")
+        except Exception as exc:  # noqa: BLE001 — degrade gracefully per spec §9
+            logger.warning("Enrichment feed %s failed: %s", name, exc)
+            return _FeedError(detail=str(exc))
+
+
+class ShodanConnectorAdapter:
+    """Async adapter around services.shodan_connector for the aggregator.
+
+    The underlying shodan_connector is synchronous (uses requests). We run its
+    calls in the default asyncio thread executor so they don't block the event
+    loop. We degrade gracefully when SHODAN_API_KEY is unset — the aggregator
+    just receives an empty dict, which it treats as "no shodan data" rather
+    than a feed error.
+    """
+
+    async def lookup(self, target: str) -> dict[str, Any]:
+        if not os.environ.get("SHODAN_API_KEY"):
+            return {}
+        try:
+            from services import shodan_connector
+        except ImportError:
+            return {}
+
+        func = getattr(shodan_connector, "host_lookup_for_recon_bridge", None)
+        if func is None:
+            logger.warning("shodan_connector.host_lookup_for_recon_bridge missing")
+            return {}
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, func, target)
+
+
+class CTLogsAdapter:
+    """Async adapter that queries crt.sh directly for CT log entries.
+
+    Unlike the other adapters, there's no Shadowbroker service to wrap —
+    crt.sh is the canonical free CT log search. We use httpx.AsyncClient
+    natively, no thread executor needed.
+
+    Returns [] on any error or empty target. Each entry is normalized to
+    {cn, issuer}; entries without name_value are skipped.
+    """
+
+    BASE = "https://crt.sh/"
+
+    def __init__(self, *, timeout: float = 10.0) -> None:
+        self._timeout = timeout
+
+    async def certificates(self, target: str) -> list[dict[str, Any]]:
+        if not target:
+            return []
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                resp = await client.get(self.BASE, params={"q": target, "output": "json"})
+            if resp.status_code != 200:
+                return []
+            data = resp.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.info("ct logs lookup miss for %s: %s", target, exc)
+            return []
+        if not isinstance(data, list):
+            return []
+        return [
+            {"cn": entry.get("name_value"), "issuer": entry.get("issuer_name")}
+            for entry in data
+            if isinstance(entry, dict) and entry.get("name_value")
+        ]
+
+
+class GeopoliticsAdapter:
+    """Async adapter around services.geopolitics.alerts_for_org_recon_bridge.
+
+    The wrapper reads the existing scheduler-populated GDELT cache; no
+    on-demand fetch happens in the request path. The thread executor
+    handles the lock acquisition + filter cleanly.
+    """
+
+    async def alerts(self, org: str) -> list[dict[str, Any]]:
+        try:
+            from services import geopolitics
+        except ImportError:
+            return []
+
+        func = getattr(geopolitics, "alerts_for_org_recon_bridge", None)
+        if func is None:
+            logger.warning("geopolitics.alerts_for_org_recon_bridge missing")
+            return []
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, func, org)
+
+
+class RegionDossierAdapter:
+    """Async adapter around services.region_dossier.lookup_for_recon_bridge.
+
+    The underlying lookup is synchronous (DNS + ip-api.com HTTP). We run it
+    in the default thread executor so it doesn't block the event loop.
+    Returns {} on any failure — region_dossier never raises into the event
+    loop.
+    """
+
+    async def lookup(self, target: str) -> dict[str, Any]:
+        try:
+            from services import region_dossier
+        except ImportError:
+            return {}
+
+        func = getattr(region_dossier, "lookup_for_recon_bridge", None)
+        if func is None:
+            logger.warning("region_dossier.lookup_for_recon_bridge missing")
+            return {}
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, func, target)
