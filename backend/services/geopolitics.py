@@ -747,7 +747,11 @@ def alerts_for_org_recon_bridge(org: str, *, max_results: int = 10) -> list[dict
         ]).lower()
         if needle not in haystack:
             continue
-        urls = props.get("_urls") or []
+        # Codex R3 P2: _build_feature_html pops props["_urls"] and stores
+        # the list under _urls_list. Read _urls_list first; fall back to
+        # _urls so we still surface a URL if recon-bridge reads the cache
+        # before _build_feature_html has run.
+        urls = props.get("_urls_list") or props.get("_urls") or []
         matches.append({
             "id": f"gdelt-{props.get('event_date', '')}-{len(matches)}",
             "headline": props.get("name") or "",
