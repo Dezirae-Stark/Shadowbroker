@@ -480,19 +480,24 @@ function NewsFeedInner({ selectedEntity, regionDossier, regionDossierLoading, on
         }
 
         let cancelled = false;
-        fetch(`${API_BASE}/api/trail/flight/${encodeURIComponent(trailId)}`, { cache: 'no-store' })
-            .then((res) => (res.ok ? res.json() : null))
-            .then((payload) => {
-                if (cancelled) return;
-                const trail = Array.isArray(payload?.trail) ? payload.trail as FlightTrailPoint[] : [];
-                setSelectedFlightTrail(trail);
-            })
-            .catch(() => {
-                if (!cancelled) setSelectedFlightTrail([]);
-            });
+        const refreshSelectedFlightTrail = () => {
+            fetch(`${API_BASE}/api/trail/flight/${encodeURIComponent(trailId)}`, { cache: 'no-store' })
+                .then((res) => (res.ok ? res.json() : null))
+                .then((payload) => {
+                    if (cancelled) return;
+                    const trail = Array.isArray(payload?.trail) ? payload.trail as FlightTrailPoint[] : [];
+                    setSelectedFlightTrail(trail);
+                })
+                .catch(() => {
+                    if (!cancelled) setSelectedFlightTrail([]);
+                });
+        };
+        refreshSelectedFlightTrail();
+        const trailRefreshTimer = window.setInterval(refreshSelectedFlightTrail, 30000);
 
         return () => {
             cancelled = true;
+            window.clearInterval(trailRefreshTimer);
         };
     }, [selectedEntity?.id, selectedEntity?.type]);
 

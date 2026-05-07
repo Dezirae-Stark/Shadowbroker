@@ -929,10 +929,9 @@ async def api_wormhole_leave(request: Request):
     updated = write_wormhole_settings(enabled=False)
     state = disconnect_wormhole(reason="leave_wormhole")
 
-    # Disable node participation when the user leaves the Wormhole.
-    from services.node_settings import write_node_settings
-
-    write_node_settings(enabled=False)
+    # Leaving private DM mode must not disable Infonet participation. Infonet
+    # sync has its own private transport warmup and can remain connected to
+    # seed/peer nodes while MeshChat stays separately opt-in.
 
     return {
         "ok": True,

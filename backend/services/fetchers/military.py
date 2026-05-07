@@ -6,6 +6,7 @@ import time
 import requests
 from services.network_utils import fetch_with_curl
 from services.fetchers._store import latest_data, _data_lock, _mark_fresh
+from services.fetchers.emissions import get_emissions_info
 from services.fetchers.plane_alert import enrich_with_plane_alert
 
 logger = logging.getLogger("services.data_fetcher")
@@ -289,6 +290,13 @@ def fetch_military_flights():
     remaining_mil = []
     for mf in military_flights:
         enrich_with_plane_alert(mf)
+        model = mf.get("model")
+        if not model or str(model).strip().lower() in {"", "unknown"}:
+            model = mf.get("alert_type") or ""
+        if model:
+            emissions = get_emissions_info(model)
+            if emissions:
+                mf["emissions"] = emissions
         if mf.get("alert_category"):
             mf["type"] = "tracked_flight"
             tracked_mil.append(mf)

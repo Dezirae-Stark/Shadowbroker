@@ -2,7 +2,7 @@ import '@testing-library/jest-dom/vitest';
 
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 let contactsState: Record<string, any> = {};
 
@@ -300,11 +300,13 @@ describe('MessagesView first-contact trust UX', () => {
     renderMessagesView();
     await openComposeForRecipient('!sb_pinned', 'hello after warmup');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Send Secure Mail' }));
+    const sendButton = screen.getByRole('button', { name: 'Send Secure Mail' });
+    await waitFor(() => expect(sendButton).toBeEnabled(), { timeout: 5000 });
+    fireEvent.click(sendButton);
 
+    await waitFor(() => expect(mocks.prepareWormholeInteractiveLane).toHaveBeenCalled(), { timeout: 5000 });
+    await waitFor(() => expect(mocks.sendDmMessage).toHaveBeenCalled(), { timeout: 5000 });
     await screen.findByText(/Mail delivered to Pinned Peer/i, {}, { timeout: 5000 });
-    expect(mocks.prepareWormholeInteractiveLane).toHaveBeenCalled();
-    expect(mocks.sendDmMessage).toHaveBeenCalled();
   }, 10000);
 
   it('does not flatten witness policy not met into a generic witnessed root label', async () => {

@@ -274,7 +274,7 @@ function hasKnownRouteName(value?: string | null): boolean {
 
 function flightHasKnownRoute(entity: ReturnType<typeof findSelectedEntity>, dynamicRoute: DynamicRoute | null): boolean {
   if (!entity) return false;
-  if (dynamicRoute?.orig_loc || dynamicRoute?.dest_loc) return true;
+  if (dynamicRoute?.orig_loc && dynamicRoute?.dest_loc) return true;
   if (!('origin_loc' in entity) && !('origin_name' in entity)) return false;
   const flight = entity as Flight;
   return Boolean(
@@ -683,19 +683,24 @@ const MaplibreViewer = ({
     const endpoint = isShip
       ? `${API_BASE}/api/trail/ship/${encodeURIComponent(trailId)}`
       : `${API_BASE}/api/trail/flight/${encodeURIComponent(trailId)}`;
-    fetch(endpoint)
-      .then((res) => (res.ok ? res.json() : null))
-      .then((payload) => {
-        if (cancelled || !payload) return;
-        const points = parseTrailPoints(payload.trail, kind);
-        setSelectedTrailPoints(points.length >= 2 ? points : fallback);
-      })
-      .catch(() => {
-        if (!cancelled) setSelectedTrailPoints(fallback);
-      });
+    const refreshSelectedTrail = () => {
+      fetch(endpoint, { cache: 'no-store' })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((payload) => {
+          if (cancelled || !payload) return;
+          const points = parseTrailPoints(payload.trail, kind);
+          setSelectedTrailPoints(points.length >= 2 ? points : fallback);
+        })
+        .catch(() => {
+          if (!cancelled) setSelectedTrailPoints(fallback);
+        });
+    };
+    refreshSelectedTrail();
+    const trailRefreshTimer = window.setInterval(refreshSelectedTrail, 30000);
 
     return () => {
       cancelled = true;
+      window.clearInterval(trailRefreshTimer);
     };
   }, [selectedEntity, data, dynamicRoute]);
 

@@ -256,7 +256,7 @@ PRIVATE_JET_TYPES = {
 # Flight trails state
 flight_trails = {}  # {icao_hex: {points: [[lat, lng, alt, ts], ...], last_seen: ts}}
 _trails_lock = threading.Lock()
-_MAX_TRACKED_TRAILS = 2000
+_MAX_TRACKED_TRAILS = 20000
 
 
 def get_flight_trail(icao24: str) -> list:
@@ -624,7 +624,7 @@ def _classify_and_publish(all_adsb_flights):
     # --- Trail Accumulation ---
     _TRAIL_INTERVAL_S = 60  # selected trails need enough resolution to show where unknown-route traffic came from
 
-    def _accumulate_trail(f, now_ts, check_route=True):
+    def _accumulate_trail(f, now_ts, attach_known_route_trail=False):
         hex_id = f.get("icao24", "").lower()
         if not hex_id:
             return 0, None
@@ -637,12 +637,9 @@ def _classify_and_publish(all_adsb_flights):
             (f.get("origin_loc") and f.get("dest_loc"))
             or (_known_route_name(f.get("origin_name")) and _known_route_name(f.get("dest_name")))
         )
-        if check_route and has_known_route:
-            f["trail"] = []
-            return 0, hex_id
         lat, lng, alt = f.get("lat"), f.get("lng"), f.get("alt", 0)
         if lat is None or lng is None:
-            f["trail"] = flight_trails.get(hex_id, {}).get("points", [])
+            f["trail"] = [] if has_known_route and not attach_known_route_trail else flight_trails.get(hex_id, {}).get("points", [])
             return 0, hex_id
         point = [round(lat, 5), round(lng, 5), round(alt, 1), round(now_ts)]
         if hex_id not in flight_trails:
@@ -663,7 +660,10 @@ def _classify_and_publish(all_adsb_flights):
             trail_data["last_seen"] = now_ts
         if len(trail_data["points"]) > 200:
             trail_data["points"] = trail_data["points"][-200:]
-        f["trail"] = trail_data["points"]
+        # Keep known-route flights visually clean in the main payload; selected
+        # detail panels can still fetch this server-side trail to compute
+        # observed fuel/CO2 burn.
+        f["trail"] = [] if has_known_route and not attach_known_route_trail else trail_data["points"]
         return 1, hex_id
 
     now_ts = datetime.utcnow().timestamp()
@@ -675,7 +675,9 @@ def _classify_and_publish(all_adsb_flights):
         tracked_snapshot = copy.deepcopy(latest_data.get("tracked_flights", []))
         raw_flights_snapshot = list(latest_data.get("flights", []))
 
-    # Skip trails for any flight with a known route; the route line replaces historical trail.
+    # Accumulate trails for every aircraft so selected details can estimate
+    # observed fuel/CO2 burn. Known-route flights keep an empty payload trail so
+    # the route line, not historical breadcrumbs, remains the visible map path.
     route_check_lists = [commercial_snapshot, private_jets_snapshot, private_ga_snapshot]
     always_trail_lists = [tracked_snapshot, military_snapshot]
     seen_hexes = set()
@@ -683,14 +685,14 @@ def _classify_and_publish(all_adsb_flights):
     with _trails_lock:
         for flist in route_check_lists:
             for f in flist:
-                count, hex_id = _accumulate_trail(f, now_ts, check_route=True)
+                count, hex_id = _accumulate_trail(f, now_ts, attach_known_route_trail=False)
                 trail_count += count
                 if hex_id:
                     seen_hexes.add(hex_id)
 
         for flist in always_trail_lists:
             for f in flist:
-                count, hex_id = _accumulate_trail(f, now_ts, check_route=True)
+                count, hex_id = _accumulate_trail(f, now_ts, attach_known_route_trail=False)
                 trail_count += count
                 if hex_id:
                     seen_hexes.add(hex_id)

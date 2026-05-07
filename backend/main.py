@@ -1084,6 +1084,7 @@ _WORMHOLE_PUBLIC_PROFILE_FIELDS = {"profile", "wormhole_enabled"}
 _PRIVATE_LANE_CONTROL_FIELDS = {"private_lane_tier", "private_lane_policy"}
 _PUBLIC_RNS_STATUS_FIELDS = {"enabled", "ready", "configured_peers", "active_peers"}
 _NODE_PUBLIC_EVENT_HOOK_REGISTERED = False
+_INFONET_PRIVATE_TRANSPORT_LOCK = threading.Lock()
 
 
 def _current_node_mode() -> str:
@@ -1170,6 +1171,50 @@ def _filter_infonet_sync_records(records: list[Any]) -> list[Any]:
         for record in records
         if _is_private_infonet_transport(str(getattr(record, "transport", "") or ""))
     ]
+
+
+def _ensure_infonet_private_transport_ready(reason: str = "") -> bool:
+    """Warm the local onion transport before private Infonet sync.
+
+    Infonet may know about an onion seed before the Wormhole UI is opened. The
+    sync worker still needs Arti marked enabled and a ready SOCKS listener, so
+    do that lazily in the worker instead of making users manually open another
+    panel just to participate in the Infonet.
+    """
+    if not _infonet_private_transport_required():
+        return True
+
+    try:
+        from services.wormhole_supervisor import _check_arti_ready
+
+        if bool(get_settings().MESH_ARTI_ENABLED) and _check_arti_ready():
+            return True
+    except Exception:
+        pass
+
+    if not _INFONET_PRIVATE_TRANSPORT_LOCK.acquire(blocking=False):
+        return False
+    try:
+        from routers.ai_intel import _write_env_value
+        from services.tor_hidden_service import tor_service
+        from services.wormhole_supervisor import _check_arti_ready
+
+        label = f" ({reason})" if reason else ""
+        logger.info("Infonet private transport warmup starting%s", label)
+        tor_result = tor_service.start(target_port=8000)
+        if tor_result.get("ok"):
+            _write_env_value("MESH_ARTI_ENABLED", "true")
+            get_settings.cache_clear()
+            if _check_arti_ready():
+                logger.info("Infonet private transport ready%s", label)
+                return True
+        logger.warning("Infonet private transport warmup incomplete%s: %s", label, tor_result)
+        return False
+    except Exception as exc:
+        logger.warning("Infonet private transport warmup failed: %s", exc)
+        return False
+    finally:
+        _INFONET_PRIVATE_TRANSPORT_LOCK.release()
 
 
 def _configured_bootstrap_seed_peer_urls() -> list[str]:
@@ -1486,6 +1531,12 @@ def _run_public_sync_cycle() -> SyncWorkerState:
         with _NODE_RUNTIME_LOCK:
             set_sync_state(updated)
         return updated
+
+    if _infonet_private_transport_required() and any(
+        str(getattr(record, "transport", "") or "").strip().lower() == "onion"
+        for record in peers
+    ):
+        _ensure_infonet_private_transport_ready("sync")
 
     last_error = "sync failed"
     for record in peers:
@@ -2295,7 +2346,13 @@ async def lifespan(app: FastAPI):
             _refresh_node_peer_store()
             if _node_runtime_supported():
                 if not _participant_node_enabled():
-                    set_sync_state(_set_node_sync_disabled_state())
+                    logger.info("Infonet participant auto-enabled for private seed sync")
+                    _set_participant_node_enabled(True)
+                threading.Thread(
+                    target=lambda: _ensure_infonet_private_transport_ready("startup"),
+                    daemon=True,
+                    name="infonet-private-transport-warmup",
+                ).start()
                 _NODE_SYNC_STOP.clear()
                 threading.Thread(target=_public_infonet_sync_loop, daemon=True).start()
                 _kick_public_sync_background("startup")
@@ -9673,10 +9730,9 @@ async def api_wormhole_leave(request: Request):
     updated = write_wormhole_settings(enabled=False)
     state = disconnect_wormhole(reason="leave_wormhole")
 
-    # Disable node participation when the user leaves the Wormhole.
-    from services.node_settings import write_node_settings
-
-    write_node_settings(enabled=False)
+    # Leaving private DM mode must not disable Infonet participation. Infonet
+    # sync has its own private transport warmup and can remain connected to
+    # seed/peer nodes while MeshChat stays separately opt-in.
 
     return {
         "ok": True,

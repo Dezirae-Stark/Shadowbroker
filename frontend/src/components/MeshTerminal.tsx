@@ -5953,7 +5953,7 @@ export default function MeshTerminal({ isOpen, launchToken = 0, onClose, onDmCou
                                 PARTICIPANT NODE
                               </div>
                               <div className="mt-1 text-sm leading-5 text-slate-400">
-                                Backend bootstrap is configured; activate the participant node to sync the public testnet seed without Wormhole.
+                                Backend bootstrap is configured; the participant node syncs the testnet seed over the private seed lane.
                               </div>
                             </div>
                             <div className="border border-cyan-500/20 bg-cyan-500/8 px-3 py-1.5 text-[13px] tracking-[0.22em] text-cyan-200">
@@ -6008,10 +6008,10 @@ export default function MeshTerminal({ isOpen, launchToken = 0, onClose, onDmCou
 
                         <div className="border border-amber-400/16 bg-amber-400/6 px-4 py-3 text-sm leading-6 text-amber-100/85">
                           <div className="text-[13px] font-mono tracking-[0.24em] text-amber-300">
-                            WORMHOLE OPTIONAL FOR NODE SYNC
+                            PRIVATE SEED LANE
                           </div>
                         <div className="mt-2">
-                          Participant-node bootstrap, sync, and public chain hosting run on the backend lane without Wormhole.
+                          Participant-node bootstrap, sync, and public chain hosting use the backend private seed lane.
                         </div>
                         <div className="mt-2 text-amber-200/75">
                           Turn Wormhole on for gates, obfuscated inbox, and the stronger obfuscated lane only.

@@ -61,7 +61,7 @@ export default function NetworkStats() {
   const nodeColor = stats.syncOutcome === 'ok' ? 'text-green-400'
     : stats.syncOutcome === 'running' ? 'text-amber-400'
     : stats.nodeEnabled ? 'text-amber-400' : 'text-gray-600';
-  const nodeLabel = stats.syncOutcome === 'ok' ? 'CONNECTED'
+  const nodeLabel = stats.syncOutcome === 'ok' ? 'SEED SYNCED'
     : stats.syncOutcome === 'running' ? 'SYNCING'
     : stats.syncOutcome === 'error' || stats.syncOutcome === 'fork' ? 'RETRYING'
     : stats.nodeEnabled ? 'WAITING' : 'OFFLINE';
