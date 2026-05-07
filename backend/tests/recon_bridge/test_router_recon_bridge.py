@@ -89,6 +89,58 @@ class TestScopeCheck:
         assert resp.status_code == 404
         assert "no manifest" in resp.json()["detail"].lower()
 
+    def test_scope_token_path_traversal_rejected(self, app_client, tmp_path: Path):
+        """Codex P1: scope_token of '../etc/passwd' must NOT escape SCOPE_MANIFEST_DIR.
+
+        Even though no manifest YAML exists outside the dir under our test layout,
+        the validation must reject traversal attempts BEFORE the file lookup,
+        otherwise a future operator who places a YAML file outside the dir
+        (or with the same name in a different scope) could be tricked into
+        loading the wrong manifest.
+        """
+        # Drop a "rogue" yaml outside the configured scope dir to prove the
+        # traversal would have escaped if validation were missing.
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir(exist_ok=True)
+        (outside_dir / "rogue.yml").write_text(yaml.safe_dump({
+            "version": 1,
+            "manifest_id": "rogue",
+            "mode": "engagement",
+            "created_at": "2025-01-01T00:00:00Z",
+            "expires_at": (datetime(2030, 1, 1, tzinfo=timezone.utc)).isoformat(),
+            "authorization": {"contract_ref": "x", "contact": "y@z"},
+            "targets": {"include": {"domains": ["*"]}},
+        }))
+
+        # The scope_token tries to escape: ../outside/rogue
+        resp = app_client.post("/bridge/scope/check", json={
+            "target": {"kind": "url", "value": "https://acme.com"},
+            "scope_token": "../outside/rogue",
+        })
+        # Expect rejection — must NOT be 200 (which would mean the rogue
+        # manifest got loaded). 400 (bad token shape) or 404 (file not
+        # found within scope dir) are both acceptable.
+        assert resp.status_code in (400, 404), (
+            f"Expected scope_token traversal to be rejected, got {resp.status_code}: {resp.text}"
+        )
+
+    def test_scope_token_absolute_path_rejected(self, app_client):
+        """Codex P1: an absolute path scope_token must also be rejected."""
+        resp = app_client.post("/bridge/scope/check", json={
+            "target": {"kind": "url", "value": "https://acme.com"},
+            "scope_token": "/etc/passwd",
+        })
+        assert resp.status_code in (400, 404)
+
+    def test_scope_token_with_special_chars_rejected(self, app_client):
+        """Validation should reject anything not matching a safe identifier
+        shape, not just literal '..' segments."""
+        resp = app_client.post("/bridge/scope/check", json={
+            "target": {"kind": "url", "value": "https://acme.com"},
+            "scope_token": "engagement;rm -rf /",
+        })
+        assert resp.status_code in (400, 404)
+
     def test_malformed_request_422(self, app_client):
         resp = app_client.post("/bridge/scope/check", json={"target": {"kind": "url"}})
         assert resp.status_code == 422

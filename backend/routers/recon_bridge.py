@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -152,14 +153,36 @@ class EnrichmentResponse(BaseModel):
 # Helpers
 # ---------------------------------------------------------------------------
 
+# Allowed shape for scope tokens: alnum + underscore + hyphen, 1-128 chars.
+# Rejects ., /, .., null bytes, shell metacharacters, etc. — first line of
+# defense against path-traversal attacks (the resolved-path containment check
+# below is the second).
+_SCOPE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+
 def _load_scope(scope_token: str) -> ScopeManifest:
     if _scope_dir is None:
         raise HTTPException(500, "scope manifest dir not configured")
-    path = _scope_dir / f"{scope_token}.yml"
-    if not path.exists():
+    if not _SCOPE_TOKEN_RE.fullmatch(scope_token):
+        # Reject any token that doesn't match a safe identifier shape.
+        raise HTTPException(
+            400,
+            f"invalid scope_token shape: must match {_SCOPE_TOKEN_RE.pattern!r}",
+        )
+    candidate = (_scope_dir / f"{scope_token}.yml").resolve()
+    base = _scope_dir.resolve()
+    # Defense-in-depth: even with the regex above, verify the resolved path
+    # remains under _scope_dir. Catches symlinks-out and any future regex
+    # weakening that might let traversal segments slip through.
+    if base != candidate.parent and base not in candidate.parents:
+        raise HTTPException(
+            400,
+            f"scope_token resolves outside SCOPE_MANIFEST_DIR",
+        )
+    if not candidate.exists():
         raise HTTPException(404, f"no manifest for scope_token={scope_token!r}")
     try:
-        return load_manifest(path)
+        return load_manifest(candidate)
     except ScopeManifestError as exc:
         raise HTTPException(500, f"manifest load failed: {exc}")
 
