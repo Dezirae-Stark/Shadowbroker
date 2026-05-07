@@ -427,3 +427,87 @@ class TestHmacEnforcement:
         finally:
             set_hmac_keys({})
             set_nonce_cache(None)
+
+
+# ---------------------------------------------------------------------------
+# Codex R3 P1+P2: hardened HMAC key parsing (_resolve_keys)
+# ---------------------------------------------------------------------------
+#
+# Round 3 review found that _resolve_keys silently accepted:
+#   - "client1:"           -> entry with empty secret bytes (b"") — anyone who
+#                             learns the key_id can forge signatures.
+#   - ":<hex>"             -> entry with empty key_id; passed boot's "if not
+#                             keys" check but no request can authenticate
+#                             because _enforce_hmac requires a truthy header.
+#
+# Both tests below should FAIL on the unfixed parser.
+
+class TestResolveKeysHardening:
+    """Direct unit tests on _resolve_keys env parsing.
+
+    These test the parser itself rather than the full HTTP pipeline so the
+    failure mode (silently accepting bad config) is unambiguous.
+    """
+
+    def test_empty_secret_entry_dropped(self, monkeypatch):
+        """`client1:` (empty hex) must NOT produce a key map entry."""
+        from routers import recon_bridge as rb
+        from routers.recon_bridge import set_hmac_keys
+
+        set_hmac_keys({})  # clear setter so env-fallback engages
+        monkeypatch.setenv("RECON_BRIDGE_HMAC_KEYS", "client1:")
+        keys = rb._resolve_keys()
+        assert "client1" not in keys, (
+            f"empty-secret entry was accepted: {keys!r}"
+        )
+        assert keys == {}, f"expected empty map, got {keys!r}"
+
+    def test_empty_secret_with_other_valid_entry_keeps_only_valid(self, monkeypatch):
+        from routers import recon_bridge as rb
+        from routers.recon_bridge import set_hmac_keys
+
+        set_hmac_keys({})
+        good_hex = ("ab" * 16)  # 16 bytes
+        monkeypatch.setenv("RECON_BRIDGE_HMAC_KEYS", f"client1:,client2:{good_hex}")
+        keys = rb._resolve_keys()
+        assert "client1" not in keys
+        assert keys.get("client2") == bytes.fromhex(good_hex)
+
+    def test_blank_key_id_entry_dropped(self, monkeypatch):
+        """`:<hex>` (empty key_id) must NOT produce a key map entry — runtime
+        auth requires a truthy X-Bridge-Key-Id, so accepting it bricks the
+        bridge silently."""
+        from routers import recon_bridge as rb
+        from routers.recon_bridge import set_hmac_keys
+
+        set_hmac_keys({})
+        monkeypatch.setenv("RECON_BRIDGE_HMAC_KEYS", f":{('ab' * 16)}")
+        keys = rb._resolve_keys()
+        assert "" not in keys, f"blank key_id was accepted: {keys!r}"
+        assert keys == {}
+
+    def test_short_secret_below_floor_dropped(self, monkeypatch):
+        """Decoded secret below 16 bytes is rejected (RFC 4868 floor for
+        HMAC-SHA256). Catches obviously-weak keys before they reach prod."""
+        from routers import recon_bridge as rb
+        from routers.recon_bridge import set_hmac_keys
+
+        set_hmac_keys({})
+        # 8 bytes = 16 hex chars, well below the 16-byte floor.
+        short_hex = "ab" * 8
+        monkeypatch.setenv("RECON_BRIDGE_HMAC_KEYS", f"weak-key:{short_hex}")
+        keys = rb._resolve_keys()
+        assert "weak-key" not in keys, (
+            f"short ({len(short_hex)//2}-byte) secret was accepted: {keys!r}"
+        )
+
+    def test_at_floor_secret_accepted(self, monkeypatch):
+        """Exactly 16 bytes is the floor — must be accepted."""
+        from routers import recon_bridge as rb
+        from routers.recon_bridge import set_hmac_keys
+
+        set_hmac_keys({})
+        floor_hex = "ab" * 16  # exactly 16 bytes
+        monkeypatch.setenv("RECON_BRIDGE_HMAC_KEYS", f"ok-key:{floor_hex}")
+        keys = rb._resolve_keys()
+        assert keys.get("ok-key") == bytes.fromhex(floor_hex)

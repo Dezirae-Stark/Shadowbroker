@@ -82,8 +82,22 @@ def set_nonce_cache(cache: Optional[NonceCache]) -> None:
     _nonce_cache = cache
 
 
+# Codex R3 P1: minimum HMAC secret length. RFC 4868 lists output_size/2 as
+# the floor for HMAC-SHA256 (16 bytes / 128 bits). bytes.fromhex("") returns
+# b"" which silently passed the previous parser, so any "key_id:" entry
+# created an empty-secret key — anyone who learned the key_id could forge
+# valid signatures.
+_HMAC_SECRET_MIN_BYTES = 16
+
+
 def _resolve_keys() -> dict[str, bytes]:
-    """Setter-first, env-fallback. Env format: 'keyid:hex,keyid2:hex'."""
+    """Setter-first, env-fallback. Env format: 'keyid:hex,keyid2:hex'.
+
+    Entries are dropped (with a warning) when:
+      - key_id is blank after stripping
+      - secret hex is malformed
+      - decoded secret is shorter than _HMAC_SECRET_MIN_BYTES
+    """
     if _hmac_keys:
         return _hmac_keys
     raw = os.environ.get("RECON_BRIDGE_HMAC_KEYS", "").strip()
@@ -95,10 +109,25 @@ def _resolve_keys() -> dict[str, bytes]:
         if not entry or ":" not in entry:
             continue
         kid, hex_secret = entry.split(":", 1)
+        kid = kid.strip()
+        if not kid:
+            # Codex R3 P2: blank key_id silently bricks the bridge — the
+            # entry parses but _enforce_hmac requires a truthy header.
+            logger.warning("RECON_BRIDGE_HMAC_KEYS: blank key_id rejected")
+            continue
         try:
-            out[kid.strip()] = bytes.fromhex(hex_secret.strip())
+            secret = bytes.fromhex(hex_secret.strip())
         except ValueError:
             logger.warning("RECON_BRIDGE_HMAC_KEYS: bad hex for key_id=%r", kid)
+            continue
+        if len(secret) < _HMAC_SECRET_MIN_BYTES:
+            logger.warning(
+                "RECON_BRIDGE_HMAC_KEYS: secret for key_id=%r is %d bytes; "
+                "minimum is %d (HMAC-SHA256 floor). Entry rejected.",
+                kid, len(secret), _HMAC_SECRET_MIN_BYTES,
+            )
+            continue
+        out[kid] = secret
     return out
 
 
