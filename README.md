@@ -8,7 +8,7 @@
 
 > **🔱 Fork notice — `Dezirae-Stark/Shadowbroker`**
 >
-> This fork carries the **recon-bridge integration** — an opt-in HMAC-signed `/bridge/*` channel that lets external vulnerability scanners (reference client: [`Dezirae-Stark/deep-eye`](https://github.com/Dezirae-Stark/deep-eye)) consult ShadowBroker for engagement-scope authorization and pre-scan OSINT enrichment. See **[Recon-Bridge.md](Recon-Bridge.md)** for setup and operations, or PR [#1](https://github.com/Dezirae-Stark/Shadowbroker/pull/1) for the diff against upstream. Existing deployments are unaffected unless `SHADOWBROKER_BRIDGE_ENABLED=true`.
+> This fork carries the **recon-bridge integration** — an opt-in HMAC-signed `/bridge/*` channel that lets external vulnerability scanners (reference client: [`Dezirae-Stark/deep-eye`](https://github.com/Dezirae-Stark/deep-eye)) consult ShadowBroker for engagement-scope authorization and pre-scan OSINT enrichment. See **[Recon-Bridge.md](Recon-Bridge.md)** for setup and operations, or PRs [#1](https://github.com/Dezirae-Stark/Shadowbroker/pull/1) (Plan A, 21 tasks) and [#2](https://github.com/Dezirae-Stark/Shadowbroker/pull/2) (Codex R3 hardening — empty/short HMAC secret rejection, blank `key_id` rejection, `pin`-kind schema cleanup, GDELT `_urls_list` field fix) for the diff against upstream. **113/113 recon_bridge tests** pass; Codex Round 4 cleared PR #2 with no findings. Existing deployments are unaffected unless `SHADOWBROKER_BRIDGE_ENABLED=true`.
 
 ---
 
